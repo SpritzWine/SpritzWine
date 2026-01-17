@@ -10,9 +10,9 @@ fn main() {
     // Get the workspace root - we need to go up to find the Wine source
     let workspace = env!("CARGO_MANIFEST_DIR");
     let root = if workspace.ends_with("/rust") {
-        format!("{workspace}/../")
+        format!("{workspace}/../wine/")
     } else {
-        format!("{workspace}/../../")
+        format!("{workspace}/../../wine/")
     };
 
     println!("cargo:warning=Workspace root: {}", root);
