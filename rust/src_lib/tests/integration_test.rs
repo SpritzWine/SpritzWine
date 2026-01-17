@@ -34,6 +34,7 @@ fn test_complete_wine_integration() {
 
     // Test with different data types
     let count = 42;
+    #[allow(clippy::approx_constant)]
     let ratio = 3.14;
     let active = true;
 
