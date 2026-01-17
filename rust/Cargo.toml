@@ -1,0 +1,35 @@
+[package]
+name = "wine"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "wine"
+path = "src_poc/main.rs"
+
+[dependencies]
+wine_api = {path = "src_lib"}
+
+
+
+[workspace]
+members = [
+"src_lib",
+"tests",
+"examples",
+
+# programms
+"src_programs/ping"
+]
+
+[workspace.lints.rust]
+rust_2024_compatibility = "warn"
+
+[workspace.package]
+publish = true
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+bindgen = "0.72.1"
+wine_api = {path = "src_lib"}

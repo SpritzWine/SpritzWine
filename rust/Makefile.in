@@ -1,0 +1,28 @@
+# Makefile for Wine Rust components
+# This file is processed by configure to produce Makefile
+
+SHELL = @SHELL@
+
+# Don't specify a target - use the default (native) target
+CARGO = cargo
+CARGO_BUILD = $(CARGO) build
+CARGO_CLEAN = $(CARGO) clean
+
+# Build targets
+all: wine_api
+
+wine_api:
+	cd src_lib && $(CARGO_BUILD) --lib
+
+# Clean targets
+clean::
+	$(CARGO_CLEAN)
+
+# Install targets
+install::
+
+# Test targets
+test:
+	$(CARGO) test
+
+.PHONY: all wine_api clean install test

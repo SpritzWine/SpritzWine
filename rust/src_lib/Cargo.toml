@@ -1,0 +1,17 @@
+[package]
+name = "wine_api"
+version = "0.1.0"
+publish.workspace = true
+edition.workspace = true
+
+[lib]
+name = "wine_api"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[build-dependencies]
+bindgen.workspace = true
+cbindgen = "0.29.0"
+
+[lints]
+workspace = true
