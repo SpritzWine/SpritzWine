@@ -1,0 +1,28 @@
+{
+    "name": "FedoraWineDevContainer",
+    "dockerFile": "./Dockerfile",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal": "/bin/bash",
+                "window.animationEnabled": false,
+                "rust-analyzer.checkOnSave.command": "clippy"
+            },
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "ms-vscode.cpptools",
+                "ms-vscode.cmake-tools",
+                "panicbit.cargo"
+            ]
+        }
+    },
+    "workspaceFolder": "/workspace",
+    "remoteUser": "devuser",
+    "postCreateCommand": "./configure --without-freetype && pip install mistral-vibe && echo 'Dev container ready! LIBCLANG_PATH is set to /usr/lib64/llvm/lib and mistral-vibe is installed.'",
+    "mounts": ["source=${localWorkspaceFolder},target=/workspace,type=bind"],
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {}
+    },
+    "forwardPorts": [3000, 8080],
+    "overrideCommand": false
+}
