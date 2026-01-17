@@ -1,0 +1,35 @@
+[package]
+name = "wine-tests"
+version = "0.1.0"
+edition.workspace = true
+authors = ["Wine Rust API Team"]
+
+[dependencies]
+wine_api.workspace = true
+
+[[bin]]
+name = "simple_test"
+path = "simple_test.rs"
+
+[[bin]]
+name = "test_minimal"
+path = "test_minimal.rs"
+
+[[bin]]
+name = "test_poc"
+path = "test_poc.rs"
+
+[[bin]]
+name = "workspace_test"
+path = "workspace_test.rs"
+
+[[bin]]
+name = "ffi_test"
+path = "ffi_test.rs"
+
+# Example test configuration
+[profile.dev]
+opt-level = 0  # Fast compile times for tests
+
+[profile.release]
+opt-level = 3  # Optimized for performance testing
