@@ -1,0 +1,14 @@
+[package]
+name = "rust-ping"
+version.workspace = true
+edition.workspace =  true
+
+[[bin]]
+name = "ping"
+path = "main.rs"
+
+[dependencies]
+clap = "4.0"
+tokio = { version = "1.0", features = ["full"] }
+pnet = "0.33"
+# Alternative: ping-rs = "0.1"  # More high-level ping implementation
