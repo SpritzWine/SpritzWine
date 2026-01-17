@@ -52,6 +52,7 @@ fn main() {
         ("kernel32", "kernel32.dll.so"),
         ("user32", "user32.dll.so"),
         ("httpapi", "httpapi.dll.so"), // Add HTTP Server API
+        ("winhttp", "winhttp.dll.so"), // Add WinHTTP client API
     ];
 
     for (lib_name, lib_file) in &wine_libs {
