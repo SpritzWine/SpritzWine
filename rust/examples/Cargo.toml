@@ -1,0 +1,11 @@
+[package]
+name = "wine_examples"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wine_api = {path = "../src_lib"}
+
+[[example]]
+name = "wine_rust_example"
+path = "wine_rust_example.rs"
