@@ -1,3 +1,4 @@
 [submodule "wine"]
 	path = wine
 	url = ssh://git@codeberg.org/SpritzWine/wine.git
+	branch = spritzwine
