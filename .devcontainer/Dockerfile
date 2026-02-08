@@ -5,6 +5,7 @@ FROM fedora:44
 # -------------------------------------------------
 
 RUN dnf update -y && dnf clean all
+# RUN dnf builddep wine -y
 RUN dnf install -y \
     gcc \
     make \
@@ -35,8 +36,8 @@ RUN dnf install -y \
     bison \
     cups-devel \
     gnutls-devel \
-    freetype-devel.x86_64 \
-    freetype.x86_64 \
+    freetype-devel.x86_64 freetype.x86_64 \
+    mingw64-glib2.noarch mingw64-glib2-static.noarch \
     libjpeg-turbo-devel \
     libpng-devel \
     libtiff-devel \
@@ -62,11 +63,16 @@ RUN dnf install -y \
     libX11-devel.i686 \
     freetype-devel.i686 \
     freetype.i686 \
-    mingw32-freetype.noarch	\
-    mingw64-freetype.noarch	\
+    mingw32-freetype.noarch mingw64-freetype.noarch	\
+    mingw32-glib2.noarch mingw32-glib2-static.noarch \
+    graphite2-devel.i686 brotli-devel.i686 \
     libXrender-devel.i686 \
-    gnutls-devel.i686 \
+    gnutls-devel.i686 nettle-devel.i686 libtasn1-devel.i686 libidn2-devel.i686 p11-kit-devel.i686 \
     alsa-lib-devel.i686 \
+    bzip2-devel.i686 \
+    libpng-devel.i686 \
+    harfbuzz-devel.i686 \
+    zlib-ng-compat-devel.i686 \
     && dnf clean all
 
 # -------------------------------------------------

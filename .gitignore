@@ -2,3 +2,13 @@
 rust/target/
 rust/Cargo.lock
 rust/src_lib/generated/
+
+**/*.dll
+**/*.exe
+
+**/*.ax
+**/*.acm
+**/*.tlb
+**/*.o
+**/*.so
+**/*.res

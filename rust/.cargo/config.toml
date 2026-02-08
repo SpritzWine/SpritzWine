@@ -5,6 +5,10 @@ target = "i686-unknown-linux-gnu"
 dir = "run -p rust-dir --bin dir"
 ping = "run -p rust-ping --bin ping"
 
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"
+rustflags = ["-C", "link-arg=-m64"]
+
 [target.i686-unknown-linux-gnu]
 linker = "gcc"
 rustflags = ["-C", "link-arg=-m32"]
