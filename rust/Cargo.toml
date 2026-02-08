@@ -10,8 +10,6 @@ path = "src_poc/main.rs"
 [dependencies]
 wine_api = {path = "src_lib"}
 
-
-
 [workspace]
 members = [
 "src_lib",
@@ -19,7 +17,8 @@ members = [
 "examples",
 
 # programms
-"src_programs/ping"
+"src_programs/ping",
+"src_programs/dir",
 ]
 
 [workspace.lints.rust]

@@ -1,0 +1,16 @@
+[package]
+name = "rust-dir"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "dir"
+path = "main.rs"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+ratatui = "0.26.1"
+crossterm = "0.27.0"
+anyhow = "1.0"
+chrono = "0.4"
+humansize = "2.1"
