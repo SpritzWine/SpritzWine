@@ -145,6 +145,9 @@ struct SystemBatteryState {
     default_alert2: u32,     // DefaultAlert2
 }
 
+// The FFI contract depends on this matching Wine's SYSTEM_BATTERY_STATE exactly.
+const _: () = assert!(core::mem::size_of::<SystemBatteryState>() == 32);
+
 /// Handles the `SystemBatteryState` case of `NtPowerInformation`, the data
 /// behind Win32's `GetSystemPowerStatus`.
 ///
@@ -269,4 +272,50 @@ fn sys_int(dir: &Path, name: &str) -> i64 {
 /// `ULONG` (wrapping for negative results, as the C cast to `ULONG` does).
 fn scale(value: i64, voltage: i64) -> u32 {
     ((value * voltage) as f64 / 1e9) as i64 as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn battery_state_rejects_bad_buffers() {
+        let mut buf = [0u8; 32];
+        assert_eq!(
+            rs_nt_fill_battery_state(core::ptr::null_mut(), 32),
+            STATUS_INVALID_PARAMETER
+        );
+        assert_eq!(
+            rs_nt_fill_battery_state(buf.as_mut_ptr() as *mut c_void, 16),
+            STATUS_BUFFER_TOO_SMALL
+        );
+    }
+
+    #[test]
+    fn battery_state_fills_a_coherent_struct() {
+        let mut bs = std::mem::MaybeUninit::<SystemBatteryState>::zeroed();
+        let rc = rs_nt_fill_battery_state(
+            bs.as_mut_ptr() as *mut c_void,
+            core::mem::size_of::<SystemBatteryState>() as u32,
+        );
+        assert_eq!(rc, STATUS_SUCCESS);
+
+        // Reading the host's real /sys/class/power_supply must not panic and must
+        // leave a coherent result: with no battery, the battery-only fields stay 0.
+        let bs = unsafe { bs.assume_init() };
+        if bs.battery_present == 0 {
+            assert_eq!(bs.charging, 0);
+            assert_eq!(bs.discharging, 0);
+            assert_eq!(bs.remaining_capacity, 0);
+        }
+    }
+
+    #[test]
+    fn scale_matches_wine_float_truncation() {
+        // 5_000_000 µAh * 12_000_000 µV / 1e9 = 60_000 (truncated).
+        assert_eq!(scale(5_000_000, 12_000_000), 60_000);
+        // A negative (discharge) result wraps into the ULONG bit pattern, so it
+        // reads back as a negative LONG — Wine relies on this for EstimatedTime.
+        assert!((scale(-1_000_000, 12_000_000) as i32) < 0);
+    }
 }
