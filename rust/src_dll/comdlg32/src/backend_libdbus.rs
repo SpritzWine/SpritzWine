@@ -266,7 +266,7 @@ unsafe fn run_on_connection(
         None => return FileChooserOutcome::Unsupported,
     };
 
-    wait_for_response(lib, conn, &handle)
+    wait_for_response(lib, conn, &handle, req)
 }
 
 // ---- request marshaling ---------------------------------------------------
@@ -285,8 +285,8 @@ unsafe fn append_args(lib: &Libdbus, msg: *mut DBusMessage, req: &FileChooserReq
     (lib.message_iter_open_container)(&mut top, DBUS_TYPE_ARRAY, c"{sv}".as_ptr(), &mut options);
 
     append_opt_string(lib, &mut options, "handle_token", "spritzwine0");
-    append_opt_bool(lib, &mut options, "multiple", false);
-    append_opt_bool(lib, &mut options, "directory", false);
+    append_opt_bool(lib, &mut options, "multiple", req.multiple);
+    append_opt_bool(lib, &mut options, "directory", req.directory);
     if let Some(folder) = &req.current_folder {
         append_opt_byte_array(lib, &mut options, "current_folder", folder);
     }
@@ -297,9 +297,39 @@ unsafe fn append_args(lib: &Libdbus, msg: *mut DBusMessage, req: &FileChooserReq
     }
     if !req.filters.is_empty() {
         append_opt_filters(lib, &mut options, &req.filters);
+        if let Some(filter) = req.current_filter.and_then(|i| req.filters.get(i)) {
+            append_opt_current_filter(lib, &mut options, filter);
+        }
     }
 
     (lib.message_iter_close_container)(&mut top, &mut options);
+}
+
+/// `current_filter` is a single `(sa(us))` (name, list of (kind, pattern)).
+unsafe fn append_opt_current_filter(
+    lib: &Libdbus,
+    options: &mut DBusMessageIter,
+    filter: &(String, Vec<String>),
+) {
+    append_dict_entry(lib, options, "current_filter", |entry| {
+        append_variant(lib, entry, c"(sa(us))", |var| {
+            let mut fstruct = DBusMessageIter::new();
+            (lib.message_iter_open_container)(var, DBUS_TYPE_STRUCT, std::ptr::null(), &mut fstruct);
+            append_string(lib, &mut fstruct, &filter.0);
+            let mut garr = DBusMessageIter::new();
+            (lib.message_iter_open_container)(&mut fstruct, DBUS_TYPE_ARRAY, c"(us)".as_ptr(), &mut garr);
+            for glob in &filter.1 {
+                let mut gstruct = DBusMessageIter::new();
+                (lib.message_iter_open_container)(&mut garr, DBUS_TYPE_STRUCT, std::ptr::null(), &mut gstruct);
+                let kind: u32 = 0;
+                (lib.message_iter_append_basic)(&mut gstruct, DBUS_TYPE_UINT32, &kind as *const _ as *const c_void);
+                append_string(lib, &mut gstruct, glob);
+                (lib.message_iter_close_container)(&mut garr, &mut gstruct);
+            }
+            (lib.message_iter_close_container)(&mut fstruct, &mut garr);
+            (lib.message_iter_close_container)(var, &mut fstruct);
+        });
+    });
 }
 
 unsafe fn append_string(lib: &Libdbus, iter: &mut DBusMessageIter, s: &str) {
@@ -424,7 +454,12 @@ unsafe fn read_object_path(lib: &Libdbus, msg: *mut DBusMessage) -> Option<Strin
     Some(CStr::from_ptr(p).to_string_lossy().into_owned())
 }
 
-unsafe fn wait_for_response(lib: &Libdbus, conn: *mut DBusConnection, handle: &str) -> FileChooserOutcome {
+unsafe fn wait_for_response(
+    lib: &Libdbus,
+    conn: *mut DBusConnection,
+    handle: &str,
+    req: &FileChooserRequest,
+) -> FileChooserOutcome {
     // Cap the wait so a wedged portal can't hang the app forever.
     let deadline = Instant::now() + Duration::from_secs(600);
     loop {
@@ -436,7 +471,7 @@ unsafe fn wait_for_response(lib: &Libdbus, conn: *mut DBusConnection, handle: &s
             let is_response =
                 (lib.message_is_signal)(msg, REQUEST_IFACE.as_ptr(), RESPONSE_MEMBER.as_ptr()) != 0;
             if is_response && signal_path_matches(lib, msg, handle) {
-                let outcome = parse_response(lib, msg);
+                let outcome = parse_response(lib, msg, req);
                 (lib.message_unref)(msg);
                 return outcome;
             }
@@ -459,7 +494,11 @@ unsafe fn signal_path_matches(lib: &Libdbus, msg: *mut DBusMessage, handle: &str
     !path.is_null() && CStr::from_ptr(path).to_bytes() == handle.as_bytes()
 }
 
-unsafe fn parse_response(lib: &Libdbus, msg: *mut DBusMessage) -> FileChooserOutcome {
+unsafe fn parse_response(
+    lib: &Libdbus,
+    msg: *mut DBusMessage,
+    req: &FileChooserRequest,
+) -> FileChooserOutcome {
     let mut iter = DBusMessageIter::new();
     if (lib.message_iter_init)(msg, &mut iter) == 0 {
         return FileChooserOutcome::Cancelled;
@@ -481,10 +520,59 @@ unsafe fn parse_response(lib: &Libdbus, msg: *mut DBusMessage) -> FileChooserOut
     }
     let uris = extract_uris(lib, &mut iter);
     if uris.is_empty() {
-        FileChooserOutcome::Cancelled
-    } else {
-        FileChooserOutcome::Chosen(uris)
+        return FileChooserOutcome::Cancelled;
     }
+    // results and uris iterate copies of the array, so we can walk it again.
+    let filter_index = extract_filter_index(lib, &mut iter, req);
+    FileChooserOutcome::Chosen { uris, filter_index }
+}
+
+/// Read the result string from a basic-string iterator position.
+unsafe fn iter_string(lib: &Libdbus, iter: &mut DBusMessageIter) -> Option<String> {
+    let mut p: *const c_char = std::ptr::null();
+    (lib.message_iter_get_basic)(iter, &mut p as *mut _ as *mut c_void);
+    (!p.is_null()).then(|| CStr::from_ptr(p).to_string_lossy().into_owned())
+}
+
+/// Find which of the request's filters the portal reported as active (the
+/// `current_filter` result is a `(sa(us))`; we match on its name).
+unsafe fn extract_filter_index(
+    lib: &Libdbus,
+    results: &mut DBusMessageIter,
+    req: &FileChooserRequest,
+) -> Option<usize> {
+    let name = current_filter_name(lib, results)?;
+    req.filters.iter().position(|(label, _)| *label == name)
+}
+
+unsafe fn current_filter_name(lib: &Libdbus, results: &mut DBusMessageIter) -> Option<String> {
+    let mut dict = DBusMessageIter::new();
+    (lib.message_iter_recurse)(results, &mut dict);
+
+    while (lib.message_iter_get_arg_type)(&mut dict) == DBUS_TYPE_DICT_ENTRY {
+        let mut entry = DBusMessageIter::new();
+        (lib.message_iter_recurse)(&mut dict, &mut entry);
+
+        if (lib.message_iter_get_arg_type)(&mut entry) == DBUS_TYPE_STRING {
+            let key = iter_string(lib, &mut entry);
+            (lib.message_iter_next)(&mut entry); // -> variant value
+            if key.as_deref() == Some("current_filter")
+                && (lib.message_iter_get_arg_type)(&mut entry) == DBUS_TYPE_VARIANT
+            {
+                let mut var = DBusMessageIter::new();
+                (lib.message_iter_recurse)(&mut entry, &mut var);
+                if (lib.message_iter_get_arg_type)(&mut var) == DBUS_TYPE_STRUCT {
+                    let mut st = DBusMessageIter::new();
+                    (lib.message_iter_recurse)(&mut var, &mut st);
+                    if (lib.message_iter_get_arg_type)(&mut st) == DBUS_TYPE_STRING {
+                        return iter_string(lib, &mut st);
+                    }
+                }
+            }
+        }
+        (lib.message_iter_next)(&mut dict);
+    }
+    None
 }
 
 /// Walk the `a{sv}` results and pull the `uris` value (`as`).

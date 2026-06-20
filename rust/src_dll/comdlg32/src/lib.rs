@@ -28,13 +28,17 @@ use backend::{FileChooserOutcome, FileChooserRequest};
 /// here directly.
 #[repr(C)]
 struct FileChooserParams {
-    save: i32, // BOOL
+    save: i32,      // BOOL
+    multiple: i32,  // BOOL
+    directory: i32, // BOOL
     title: *const c_char,
     initial_dir: *const c_char,
     current_name: *const c_char,
     filters: *const c_char,
-    out_path: *mut c_char,
-    out_size: u32, // ULONG: in = capacity, out = bytes needed (incl. NUL)
+    current_filter: u32, // ULONG: 1-based filter to pre-select, 0 = none
+    out_paths: *mut c_char,
+    out_size: u32,  // ULONG: in = capacity, out = bytes needed (incl. final NUL)
+    out_filter: u32, // ULONG: out = 1-based selected filter, 0 = unknown
 }
 
 /// Unix-call entry point for `unix_file_chooser` (`NTSTATUS rs_portal_file_chooser(void *args)`).
@@ -60,11 +64,15 @@ fn run(params: &mut FileChooserParams) -> i32 {
     match backend::active().run(&request) {
         FileChooserOutcome::Unsupported => status::STATUS_NOT_SUPPORTED,
         FileChooserOutcome::Cancelled => status::STATUS_CANCELLED,
-        FileChooserOutcome::Chosen(uris) => {
-            match uris.first().and_then(|u| convert::file_uri_to_path(u)) {
-                Some(path) => write_out_path(params, &path),
-                None => status::STATUS_CANCELLED,
+        FileChooserOutcome::Chosen { uris, filter_index } => {
+            let paths: Vec<String> =
+                uris.iter().filter_map(|u| convert::file_uri_to_path(u)).collect();
+            if paths.is_empty() {
+                return status::STATUS_CANCELLED;
             }
+            // ABI uses a 1-based filter index (0 = unknown).
+            params.out_filter = filter_index.map(|i| i as u32 + 1).unwrap_or(0);
+            write_out_paths(params, &paths)
         }
     }
 }
@@ -72,26 +80,35 @@ fn run(params: &mut FileChooserParams) -> i32 {
 fn build_request(p: &FileChooserParams) -> FileChooserRequest {
     FileChooserRequest {
         save: p.save != 0,
+        multiple: p.multiple != 0,
+        directory: p.directory != 0,
         title: cstr_opt(p.title).unwrap_or_default(),
         current_folder: cstr_opt(p.initial_dir),
         current_name: cstr_opt(p.current_name),
         filters: convert::parse_filters(&read_filter_blob(p.filters)),
+        // ABI is 1-based (0 = none); the request is 0-based.
+        current_filter: (p.current_filter > 0).then(|| p.current_filter as usize - 1),
     }
 }
 
-/// Copy `path` (+ NUL) into `params.out_path`, reporting the required size.
-fn write_out_path(params: &mut FileChooserParams, path: &str) -> i32 {
-    let bytes = path.as_bytes();
-    let needed = bytes.len() + 1; // + NUL
-    let capacity = params.out_size as usize;
-    params.out_size = needed as u32; // report need either way
+/// Serialize `paths` into `params.out_paths` as a NUL-separated, double-NUL-
+/// terminated list, reporting the required size.
+fn write_out_paths(params: &mut FileChooserParams, paths: &[String]) -> i32 {
+    let mut buf: Vec<u8> = Vec::new();
+    for p in paths {
+        buf.extend_from_slice(p.as_bytes());
+        buf.push(0);
+    }
+    buf.push(0); // final terminator
 
-    if params.out_path.is_null() || needed > capacity {
+    let capacity = params.out_size as usize;
+    params.out_size = buf.len() as u32; // report need either way
+
+    if params.out_paths.is_null() || buf.len() > capacity {
         return status::STATUS_BUFFER_TOO_SMALL;
     }
     unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), params.out_path as *mut u8, bytes.len());
-        *params.out_path.add(bytes.len()) = 0;
+        std::ptr::copy_nonoverlapping(buf.as_ptr(), params.out_paths as *mut u8, buf.len());
     }
     status::STATUS_SUCCESS
 }
@@ -131,68 +148,102 @@ mod tests {
     use super::*;
     use backend::FileChooserBackend;
 
-    /// A backend that returns a canned outcome, so we can exercise `run`'s
-    /// marshaling without a live bus.
-    struct FakeBackend(FileChooserOutcome);
-    impl backend::FileChooserBackend for FakeBackend {
+    struct Fake(FileChooserOutcome);
+    impl FileChooserBackend for Fake {
         fn run(&self, _r: &FileChooserRequest) -> FileChooserOutcome {
             match &self.0 {
-                FileChooserOutcome::Chosen(v) => FileChooserOutcome::Chosen(v.clone()),
+                FileChooserOutcome::Chosen { uris, filter_index } => FileChooserOutcome::Chosen {
+                    uris: uris.clone(),
+                    filter_index: *filter_index,
+                },
                 FileChooserOutcome::Cancelled => FileChooserOutcome::Cancelled,
                 FileChooserOutcome::Unsupported => FileChooserOutcome::Unsupported,
             }
         }
     }
 
-    fn run_with(outcome: FileChooserOutcome, buf: &mut [u8]) -> (i32, u32) {
+    fn chosen(uris: &[&str], filter: Option<usize>) -> FileChooserOutcome {
+        FileChooserOutcome::Chosen {
+            uris: uris.iter().map(|s| s.to_string()).collect(),
+            filter_index: filter,
+        }
+    }
+
+    /// Drive the same outcome-mapping `run` uses, against a fake backend.
+    /// Returns (status, out_size, out_filter).
+    fn run_with(outcome: FileChooserOutcome, buf: &mut [u8]) -> (i32, u32, u32) {
         let request = FileChooserRequest {
             save: false,
+            multiple: false,
+            directory: false,
             title: String::new(),
             current_folder: None,
             current_name: None,
             filters: Vec::new(),
+            current_filter: None,
         };
-        let backend = FakeBackend(outcome);
         let mut params = FileChooserParams {
             save: 0,
+            multiple: 0,
+            directory: 0,
             title: std::ptr::null(),
             initial_dir: std::ptr::null(),
             current_name: std::ptr::null(),
             filters: std::ptr::null(),
-            out_path: buf.as_mut_ptr() as *mut c_char,
+            current_filter: 0,
+            out_paths: buf.as_mut_ptr() as *mut c_char,
             out_size: buf.len() as u32,
+            out_filter: 0,
         };
-        let status = match backend.run(&request) {
+        let st = match Fake(outcome).run(&request) {
             FileChooserOutcome::Unsupported => status::STATUS_NOT_SUPPORTED,
             FileChooserOutcome::Cancelled => status::STATUS_CANCELLED,
-            FileChooserOutcome::Chosen(uris) => {
-                match uris.first().and_then(|u| convert::file_uri_to_path(u)) {
-                    Some(path) => write_out_path(&mut params, &path),
-                    None => status::STATUS_CANCELLED,
+            FileChooserOutcome::Chosen { uris, filter_index } => {
+                let paths: Vec<String> =
+                    uris.iter().filter_map(|u| convert::file_uri_to_path(u)).collect();
+                if paths.is_empty() {
+                    status::STATUS_CANCELLED
+                } else {
+                    params.out_filter = filter_index.map(|i| i as u32 + 1).unwrap_or(0);
+                    write_out_paths(&mut params, &paths)
                 }
             }
         };
-        (status, params.out_size)
+        (st, params.out_size, params.out_filter)
     }
 
     #[test]
-    fn chosen_writes_dos_free_host_path() {
+    fn single_path_is_double_nul_list() {
         let mut buf = [0u8; 64];
-        let (st, size) =
-            run_with(FileChooserOutcome::Chosen(vec!["file:///home/u/a%20b.txt".into()]), &mut buf);
+        let (st, size, _) = run_with(chosen(&["file:///home/u/a%20b.txt"], None), &mut buf);
         assert_eq!(st, status::STATUS_SUCCESS);
-        let written = &buf[..size as usize - 1];
-        assert_eq!(written, b"/home/u/a b.txt");
-        assert_eq!(buf[size as usize - 1], 0); // NUL-terminated
+        assert_eq!(&buf[..size as usize], b"/home/u/a b.txt\0\0");
+    }
+
+    #[test]
+    fn multiple_paths_nul_separated() {
+        let mut buf = [0u8; 128];
+        let (st, size, _) =
+            run_with(chosen(&["file:///d/one.txt", "file:///d/two.txt"], None), &mut buf);
+        assert_eq!(st, status::STATUS_SUCCESS);
+        assert_eq!(&buf[..size as usize], b"/d/one.txt\0/d/two.txt\0\0");
+    }
+
+    #[test]
+    fn filter_index_is_one_based_out() {
+        let mut buf = [0u8; 64];
+        assert_eq!(run_with(chosen(&["file:///d/x.txt"], Some(0)), &mut buf).2, 1);
+        assert_eq!(run_with(chosen(&["file:///d/x.txt"], Some(2)), &mut [0u8; 64]).2, 3);
+        assert_eq!(run_with(chosen(&["file:///d/x.txt"], None), &mut [0u8; 64]).2, 0);
     }
 
     #[test]
     fn buffer_too_small_reports_need() {
         let mut buf = [0u8; 4];
-        let (st, size) =
-            run_with(FileChooserOutcome::Chosen(vec!["file:///home/u/a.txt".into()]), &mut buf);
+        let (st, size, _) = run_with(chosen(&["file:///home/u/a.txt"], None), &mut buf);
         assert_eq!(st, status::STATUS_BUFFER_TOO_SMALL);
-        assert_eq!(size, "/home/u/a.txt".len() as u32 + 1);
+        // path + separator NUL + final NUL
+        assert_eq!(size, "/home/u/a.txt".len() as u32 + 2);
     }
 
     #[test]
@@ -208,7 +259,6 @@ mod tests {
     #[test]
     fn non_file_uri_is_treated_as_cancel() {
         let mut buf = [0u8; 16];
-        let (st, _) = run_with(FileChooserOutcome::Chosen(vec!["http://x/y".into()]), &mut buf);
-        assert_eq!(st, status::STATUS_CANCELLED);
+        assert_eq!(run_with(chosen(&["http://x/y"], None), &mut buf).0, status::STATUS_CANCELLED);
     }
 }

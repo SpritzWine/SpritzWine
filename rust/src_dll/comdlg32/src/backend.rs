@@ -12,6 +12,10 @@
 pub struct FileChooserRequest {
     /// `true` for a Save dialog, `false` for Open.
     pub save: bool,
+    /// Allow selecting more than one file.
+    pub multiple: bool,
+    /// Pick a directory rather than a file.
+    pub directory: bool,
     /// Dialog title (may be empty).
     pub title: String,
     /// Directory to start in, as a host path (e.g. `/home/user`).
@@ -20,12 +24,20 @@ pub struct FileChooserRequest {
     pub current_name: Option<String>,
     /// `(label, globs)` pairs, e.g. `("Text", ["*.txt", "*.log"])`.
     pub filters: Vec<(String, Vec<String>)>,
+    /// 0-based index into `filters` to pre-select, if any.
+    pub current_filter: Option<usize>,
 }
 
 /// Outcome of showing the chooser.
 pub enum FileChooserOutcome {
-    /// The user accepted; URIs (typically `file://…`) in selection order.
-    Chosen(Vec<String>),
+    /// The user accepted.
+    Chosen {
+        /// URIs (typically `file://…`) in selection order.
+        uris: Vec<String>,
+        /// 0-based index into the request's `filters` that the user had active,
+        /// if the portal reported one.
+        filter_index: Option<usize>,
+    },
     /// The user dismissed / cancelled the dialog.
     Cancelled,
     /// No usable portal on the bus — the caller should fall back to Wine's own
