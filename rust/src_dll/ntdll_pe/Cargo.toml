@@ -16,8 +16,17 @@ path = "src/lib.rs"
 # The PE link environment has no unwinder; abort on panic so no eh_personality /
 # _Unwind_Resume is required. (This crate is excluded from the workspace so this
 # profile is honored rather than ignored.)
+#
+# codegen-units = 1 makes the crate compile to a single object, so the PE link can
+# pull every entry point by forcing one anchor symbol (-Wl,-u) instead of one per
+# function — see wine_ntdll_pe_anchor in lib.rs. opt-level="z"/lto/strip keep the
+# code linked into ntdll.dll.so small.
 [profile.release]
 panic = "abort"
+opt-level = "z"
+codegen-units = 1
+lto = true
+strip = true
 
 [profile.dev]
 panic = "abort"

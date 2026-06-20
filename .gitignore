@@ -3,6 +3,9 @@
 memory/
 
 rust/target/
+# stray per-crate target dirs (e.g. from `cargo test` in an excluded crate dir);
+# the real builds use the shared rust/target/
+rust/**/target/
 rust/Cargo.lock
 rust/src_lib/generated/
 

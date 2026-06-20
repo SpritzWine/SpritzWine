@@ -73,3 +73,14 @@ mod rt {
 
 pub mod rtl_compress;
 pub mod status;
+
+/// Linker anchor for the PE-side static-archive link.
+///
+/// `ntdll.dll.so` is linked with this archive placed *before* the objects that
+/// reference it, so ld would otherwise discard its members. The dll's
+/// `EXTRADLLFLAGS` forces this one symbol with `-Wl,-u,wine_ntdll_pe_anchor`;
+/// because the crate is built with `codegen-units = 1` it is a single object, so
+/// pulling this symbol pulls every `#[no_mangle]` entry point with it. Add new PE
+/// functions without touching the link flags.
+#[unsafe(no_mangle)]
+pub extern "C" fn wine_ntdll_pe_anchor() {}
