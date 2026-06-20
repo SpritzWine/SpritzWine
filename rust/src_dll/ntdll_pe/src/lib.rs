@@ -71,4 +71,5 @@ mod rt {
     }
 }
 
+pub mod rtl_compress;
 pub mod status;
