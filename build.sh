@@ -42,6 +42,9 @@ echo "==> [3/6] Building the standalone per-dll Rust crates (libwine_ntdll, …)
 # generated in step 4.
 cd "$ROOT/rust"
 cargo build --release -p wine_ntdll
+# Portal client for comdlg32's unix side (host file chooser via XDG desktop
+# portal); linked into comdlg32.so in step 4, so it must exist first.
+cargo build --release -p wine_comdlg32
 
 # The PE-side static lib (no_std, panic=abort) is excluded from the workspace so
 # its own profile is honored; it gets linked into ntdll's PE image (ntdll.dll.so)

@@ -1,0 +1,15 @@
+[package]
+name = "wine_comdlg32"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Rust portal client for comdlg32's Unix side. Linked into comdlg32.so via
+# UNIX_LIBS (see dlls/comdlg32/Makefile.in, `$(WINE_RUST_LDFLAGS) -Wl,-lwine_comdlg32`)
+# and invoked through __wine_unix_call. Like wine_ntdll, it deliberately has NO
+# dependency on the other Wine dlls, so libwine_comdlg32.so builds standalone
+# *before* Wine and links into comdlg32 without a build/link cycle.
+[lib]
+name = "wine_comdlg32"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
