@@ -43,6 +43,11 @@ echo "==> [3/6] Building the standalone per-dll Rust crates (libwine_ntdll, …)
 cd "$ROOT/rust"
 cargo build --release -p wine_ntdll
 
+# The PE-side static lib (no_std, panic=abort) is excluded from the workspace so
+# its own profile is honored; it gets linked into ntdll's PE image (ntdll.dll.so)
+# in step 4, so it must exist first.
+cargo build --release --manifest-path src_dll/ntdll_pe/Cargo.toml --target-dir target
+
 echo "==> [4/6] Building Wine's dlls and headers (generates headers; links libwine_ntdll into ntdll)"
 cd "$ROOT/wine"
 make -j"$JOBS" -C include

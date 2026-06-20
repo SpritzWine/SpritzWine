@@ -21,6 +21,11 @@ members = [
 "src_programs/ping",
 "src_programs/dir",
 ]
+# PE-side staticlib: kept out of the workspace so its own `panic = "abort"`
+# profile is honored. Built explicitly (see build.sh), linked into ntdll.dll.so.
+exclude = [
+"src_dll/ntdll_pe",
+]
 
 [workspace.lints.rust]
 rust_2024_compatibility = "warn"

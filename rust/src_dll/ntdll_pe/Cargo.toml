@@ -1,0 +1,23 @@
+[package]
+name = "wine_ntdll_pe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# PE-side Rust for ntdll. Unlike the Unix-side `wine_ntdll` cdylib (which links
+# into ntdll.so via UNIX_LIBS), this is a `no_std` + `alloc` static library linked
+# directly into Wine's PE `ntdll.dll.so` (winegcc -nodefaultlibs). It allocates
+# through Wine's libc and aborts on panic, since that environment has no unwinder.
+[lib]
+name = "wine_ntdll_pe"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+# The PE link environment has no unwinder; abort on panic so no eh_personality /
+# _Unwind_Resume is required. (This crate is excluded from the workspace so this
+# profile is honored rather than ignored.)
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
