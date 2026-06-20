@@ -11,7 +11,8 @@
 #     -> those headers only exist after Wine's dlls have been built (widl)
 #   * Wine's ping example links wine_api                    -> build it last
 #
-# Override parallelism with JOBS=… and the configure flags with CONFIGURE_FLAGS=…
+# Override parallelism with JOBS=…, the configure flags with CONFIGURE_FLAGS=…,
+# and disable the optional Wayland driver with WITH_WAYLAND=no.
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -19,9 +20,34 @@ ROOT="$(pwd)"
 JOBS="${JOBS:-$(nproc)}"
 
 # Wine must be a 32-bit (i386) build so its HOST_ARCH matches the i686 Rust
-# target pinned in rust/.cargo/config.toml -- hence --disable-win64. The other
-# flags just keep the build lean/headless; adjust them for your environment.
+# target pinned in rust/.cargo/config.toml -- hence --disable-win64. The build is
+# otherwise lean/headless; the optional Wayland display driver is auto-enabled
+# when its 32-bit dev files are present (see step [2/6]). Adjust for your env.
 CONFIGURE_FLAGS="${CONFIGURE_FLAGS:---disable-win64 --without-x --without-freetype}"
+
+# Auto-enable Wine's Wayland driver when the *32-bit* wayland/xkb dev files are
+# available. Their pkg-config files live outside the default search path on
+# multilib systems (e.g. Fedora's /usr/lib/pkgconfig), so we locate them and
+# point pkg-config there for ./configure. Force off with WITH_WAYLAND=no.
+WITH_WAYLAND="${WITH_WAYLAND:-auto}"
+
+detect_wayland_pkgconfig() {
+    local dir
+    for dir in /usr/lib/pkgconfig /usr/lib32/pkgconfig /usr/lib/i386-linux-gnu/pkgconfig; do
+        [ -d "$dir" ] || continue
+        # --cflags --libs resolves Requires.private too, so this only succeeds
+        # when the whole 32-bit closure (libffi, libxml-2.0, liblzma, zlib, …) is
+        # installed. Restricting PKG_CONFIG_LIBDIR mirrors Wine's own configure,
+        # so it won't false-positive on 64-bit-only .pc files.
+        if PKG_CONFIG_LIBDIR="$dir:/usr/share/pkgconfig" pkg-config --cflags --libs \
+               wayland-client wayland-egl wayland-cursor xkbcommon xkbregistry \
+               >/dev/null 2>&1; then
+            echo "$dir"
+            return 0
+        fi
+    done
+    return 1
+}
 
 echo "==> [1/6] Fetching the Wine submodule"
 git submodule update --init --recursive
@@ -31,7 +57,15 @@ cd "$ROOT/wine"
 if [ -f Makefile ] && [ Makefile -nt configure ]; then
     echo "    wine/Makefile is up to date; skipping configure."
 else
-    echo "    wine/Makefile is stale or missing; running configure..."
+    # Enable the Wayland driver if its 32-bit dev files are present.
+    if [ "$WITH_WAYLAND" != "no" ] && command -v pkg-config >/dev/null 2>&1 \
+       && wl_pcdir="$(detect_wayland_pkgconfig)"; then
+        echo "    Wayland 32-bit dev files found ($wl_pcdir); enabling winewayland.drv."
+        export PKG_CONFIG_PATH="$wl_pcdir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    else
+        echo "    No Wayland 32-bit dev files; configuring headless (no display driver)."
+    fi
+    echo "    Running configure..."
     # shellcheck disable=SC2086
     ./configure $CONFIGURE_FLAGS
 fi
