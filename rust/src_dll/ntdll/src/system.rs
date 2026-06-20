@@ -178,11 +178,45 @@ pub extern "C" fn rs_nt_fill_battery_state(output: *mut c_void, out_size: u32) -
     STATUS_SUCCESS
 }
 
+/// One power supply's sysfs attributes, abstracted over the backing store so the
+/// aggregation logic can be unit-tested without a real `/sys/class/power_supply`.
+trait PowerSupply {
+    /// A string attribute (the sysfs file's first line, trimmed), or `None` if
+    /// the attribute is absent.
+    fn attr(&self, name: &str) -> Option<String>;
+
+    /// An integer attribute, 0 if missing or unparseable (matching Wine's `atoi`).
+    fn attr_int(&self, name: &str) -> i64 {
+        self.attr(name).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0)
+    }
+}
+
+/// A power supply backed by a real `/sys/class/power_supply/<name>` directory.
+struct SysfsSupply(std::path::PathBuf);
+
+impl PowerSupply for SysfsSupply {
+    fn attr(&self, name: &str) -> Option<String> {
+        let content = fs::read_to_string(self.0.join(name)).ok()?;
+        Some(content.lines().next().unwrap_or("").trim().to_string())
+    }
+}
+
 fn read_battery_state() -> SystemBatteryState {
-    // Default to "AC online, no battery" — matches Wine's C when there is no
-    // power_supply class (e.g. a desktop or a container).
+    let supplies: Vec<SysfsSupply> = match fs::read_dir("/sys/class/power_supply") {
+        Ok(entries) => entries.filter_map(Result::ok).map(|e| SysfsSupply(e.path())).collect(),
+        // No power-supply class at all (desktop / container): report AC online.
+        Err(_) => Vec::new(),
+    };
+    aggregate_battery_state(&supplies)
+}
+
+/// Builds the composite `SYSTEM_BATTERY_STATE` across *all* mains and batteries,
+/// the way Windows reports them as a single logical battery. This is where the
+/// Rust port improves on Wine's C, which only ever looked at the first of each
+/// (it logged a FIXME and ignored the rest).
+fn aggregate_battery_state<S: PowerSupply>(supplies: &[S]) -> SystemBatteryState {
     let mut bs = SystemBatteryState {
-        ac_on_line: 1,
+        ac_on_line: 0,
         battery_present: 0,
         charging: 0,
         discharging: 0,
@@ -196,82 +230,91 @@ fn read_battery_state() -> SystemBatteryState {
         default_alert2: 0,
     };
 
-    let Ok(entries) = fs::read_dir("/sys/class/power_supply") else {
-        return bs;
-    };
+    let mut found_mains = false;
+    let mut ac_online = false;
+    let mut any_charging = false;
+    let mut any_discharging = false;
+    let mut total_max: i64 = 0;
+    let mut total_remaining: i64 = 0;
+    let mut total_rate: i64 = 0; // signed net rate: + charging, - discharging
 
-    let mut found_ac = false;
-
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-
+    for s in supplies {
         // Skip device-scoped supplies (peripheral batteries: mice, keyboards…).
-        if sys_str(&path, "scope").as_deref() == Some("Device") {
+        if s.attr("scope").as_deref() == Some("Device") {
             continue;
         }
-        let Some(kind) = sys_str(&path, "type") else { continue };
-
-        match kind.as_str() {
-            "Mains" => {
-                let Some(online) = sys_str(&path, "online") else { continue };
-                // Wine reports only the first mains supply.
-                if found_ac {
-                    continue;
-                }
-                bs.ac_on_line = (online.parse::<i32>().unwrap_or(0) != 0) as u8;
-                found_ac = true;
+        match s.attr("type").as_deref() {
+            Some("Mains") => {
+                let Some(online) = s.attr("online") else { continue };
+                found_mains = true;
+                ac_online |= online.parse::<i32>().unwrap_or(0) != 0;
             }
-            "Battery" => {
-                let Some(status) = sys_str(&path, "status") else { continue };
-                // Wine reports only the first battery.
-                if bs.battery_present != 0 {
-                    continue;
-                }
-                bs.charging = (status == "Charging") as u8;
-                bs.discharging = (status == "Discharging") as u8;
+            Some("Battery") => {
+                let Some(status) = s.attr("status") else { continue };
                 bs.battery_present = 1;
 
-                let voltage = sys_int(&path, "voltage_now"); // microvolts
-                bs.max_capacity = scale(sys_int(&path, "charge_full"), voltage);
-                bs.remaining_capacity = scale(sys_int(&path, "charge_now"), voltage);
-                bs.rate = scale(-sys_int(&path, "current_now"), voltage);
+                let voltage = s.attr_int("voltage_now"); // microvolts
+                total_max += scale(s.attr_int("charge_full"), voltage);
+                total_remaining += scale(s.attr_int("charge_now"), voltage);
 
-                // Rate is stored unsigned but read back as a signed LONG; a
-                // negative rate means discharging, so we can estimate runtime.
-                if bs.charging == 0 && (bs.rate as i32) < 0 {
-                    let drain = (-(bs.rate as i32)) as u32;
-                    bs.estimated_time = 3600u32.wrapping_mul(bs.remaining_capacity) / drain;
-                } else {
-                    bs.estimated_time = u32::MAX;
+                // current_now is a magnitude on most drivers; take the direction
+                // from `status` rather than its (driver-dependent) sign.
+                let magnitude = scale(s.attr_int("current_now").abs(), voltage);
+                match status.as_str() {
+                    "Charging" => {
+                        any_charging = true;
+                        total_rate += magnitude;
+                    }
+                    "Discharging" => {
+                        any_discharging = true;
+                        total_rate -= magnitude;
+                    }
+                    _ => {}
                 }
             }
             _ => {}
         }
     }
 
+    // AC is online if any mains is online; default to online when there is no
+    // mains supply at all (matches Wine's "assume AC" fallback).
+    bs.ac_on_line = (!found_mains || ac_online) as u8;
+
+    if bs.battery_present != 0 {
+        bs.max_capacity = total_max as u32;
+        bs.remaining_capacity = total_remaining as u32;
+        // Negative (net discharging) wraps into the ULONG bit pattern, so apps
+        // reading Rate as a signed LONG see a negative value.
+        bs.rate = total_rate as u32;
+
+        // Charge direction from the net rate, falling back to the reported
+        // status when the net rate is unknown (0).
+        if total_rate > 0 {
+            bs.charging = 1;
+        } else if total_rate < 0 {
+            bs.discharging = 1;
+        } else {
+            bs.charging = (any_charging && !any_discharging) as u8;
+            bs.discharging = (any_discharging && !any_charging) as u8;
+        }
+
+        bs.estimated_time = if total_rate < 0 {
+            let drain = (-total_rate) as u32;
+            3600u32.wrapping_mul(bs.remaining_capacity) / drain
+        } else {
+            u32::MAX
+        };
+    }
+
     bs
 }
 
-/// Mirrors Wine's `get_sys_str`: the first line of `<dir>/<name>`, trimmed.
-/// Returns `None` if the attribute is absent (the sysfs file doesn't exist).
-fn sys_str(dir: &Path, name: &str) -> Option<String> {
-    let content = fs::read_to_string(dir.join(name)).ok()?;
-    Some(content.lines().next().unwrap_or("").trim().to_string())
-}
-
-/// Mirrors Wine's `get_sys_int`: the attribute parsed as an integer, 0 if
-/// missing or unparseable (matching `atoi` on a failed read).
-fn sys_int(dir: &Path, name: &str) -> i64 {
-    sys_str(dir, name)
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0)
-}
-
-/// Mirrors Wine's `get_sys_int(...) * voltage / 1e9`: a 64-bit product scaled by
-/// 1e9 in floating point, truncated toward zero, then stored into a 32-bit
-/// `ULONG` (wrapping for negative results, as the C cast to `ULONG` does).
-fn scale(value: i64, voltage: i64) -> u32 {
-    ((value * voltage) as f64 / 1e9) as i64 as u32
+/// Wine's `get_sys_int(...) * voltage / 1e9`: a 64-bit product scaled by 1e9 in
+/// floating point and truncated toward zero (microamp-hours × microvolts → the
+/// milliwatt-hour-ish units Windows expects). Kept signed so net charge/discharge
+/// rates can be summed across batteries.
+fn scale(value: i64, voltage: i64) -> i64 {
+    ((value * voltage) as f64 / 1e9) as i64
 }
 
 #[cfg(test)]
@@ -312,10 +355,100 @@ mod tests {
 
     #[test]
     fn scale_matches_wine_float_truncation() {
-        // 5_000_000 µAh * 12_000_000 µV / 1e9 = 60_000 (truncated).
+        // 5_000_000 µAh * 12_000_000 µV / 1e9 = 60_000 (truncated toward zero).
         assert_eq!(scale(5_000_000, 12_000_000), 60_000);
-        // A negative (discharge) result wraps into the ULONG bit pattern, so it
-        // reads back as a negative LONG — Wine relies on this for EstimatedTime.
-        assert!((scale(-1_000_000, 12_000_000) as i32) < 0);
+        assert_eq!(scale(-1_000_000, 12_000_000), -12_000);
+        // Stored into the ULONG Rate field, a negative value reads back as a
+        // negative LONG — what EstimatedTime relies on.
+        assert!((scale(-1_000_000, 12_000_000) as u32 as i32) < 0);
+    }
+
+    /// A power supply with attributes supplied directly, so the aggregation can
+    /// be exercised without a real `/sys/class/power_supply`.
+    struct FakeSupply(std::collections::HashMap<&'static str, &'static str>);
+
+    impl FakeSupply {
+        fn new(attrs: &[(&'static str, &'static str)]) -> Self {
+            FakeSupply(attrs.iter().copied().collect())
+        }
+    }
+
+    impl PowerSupply for FakeSupply {
+        fn attr(&self, name: &str) -> Option<String> {
+            self.0.get(name).map(|s| s.to_string())
+        }
+    }
+
+    #[test]
+    fn aggregates_multiple_batteries() {
+        let supplies = vec![
+            FakeSupply::new(&[("type", "Mains"), ("online", "1")]),
+            // Discharging at 12_000 (mW-ish): 60_000 max / 30_000 remaining.
+            FakeSupply::new(&[
+                ("type", "Battery"),
+                ("status", "Discharging"),
+                ("voltage_now", "12000000"),
+                ("charge_full", "5000000"),
+                ("charge_now", "2500000"),
+                ("current_now", "1000000"),
+            ]),
+            // Charging at 6_000: 48_000 max / 12_000 remaining.
+            FakeSupply::new(&[
+                ("type", "Battery"),
+                ("status", "Charging"),
+                ("voltage_now", "12000000"),
+                ("charge_full", "4000000"),
+                ("charge_now", "1000000"),
+                ("current_now", "500000"),
+            ]),
+        ];
+
+        let bs = aggregate_battery_state(&supplies);
+        assert_eq!(bs.ac_on_line, 1);
+        assert_eq!(bs.battery_present, 1);
+        assert_eq!(bs.max_capacity, 108_000); // 60_000 + 48_000
+        assert_eq!(bs.remaining_capacity, 42_000); // 30_000 + 12_000
+        assert_eq!(bs.rate as i32, -6_000); // -12_000 + 6_000 net discharge
+        assert_eq!(bs.discharging, 1);
+        assert_eq!(bs.charging, 0);
+        assert_eq!(bs.estimated_time, 3600 * 42_000 / 6_000); // 25_200
+    }
+
+    #[test]
+    fn ac_online_if_any_mains_online() {
+        let mixed = vec![
+            FakeSupply::new(&[("type", "Mains"), ("online", "0")]),
+            FakeSupply::new(&[("type", "Mains"), ("online", "1")]),
+        ];
+        assert_eq!(aggregate_battery_state(&mixed).ac_on_line, 1);
+
+        let all_off = vec![
+            FakeSupply::new(&[("type", "Mains"), ("online", "0")]),
+            FakeSupply::new(&[("type", "Mains"), ("online", "0")]),
+        ];
+        assert_eq!(aggregate_battery_state(&all_off).ac_on_line, 0);
+    }
+
+    #[test]
+    fn no_supplies_reports_ac_and_no_battery() {
+        let bs = aggregate_battery_state::<FakeSupply>(&[]);
+        assert_eq!(bs.ac_on_line, 1);
+        assert_eq!(bs.battery_present, 0);
+        assert_eq!(bs.estimated_time, 0);
+    }
+
+    #[test]
+    fn skips_device_scoped_batteries() {
+        // A peripheral (e.g. a wireless mouse) must not count as the system battery.
+        let supplies = vec![FakeSupply::new(&[
+            ("type", "Battery"),
+            ("scope", "Device"),
+            ("status", "Discharging"),
+            ("voltage_now", "4000000"),
+            ("charge_full", "1000000"),
+            ("charge_now", "500000"),
+            ("current_now", "100000"),
+        ])];
+        assert_eq!(aggregate_battery_state(&supplies).battery_present, 0);
     }
 }
