@@ -275,8 +275,10 @@ unsafe fn append_args(lib: &Libdbus, msg: *mut DBusMessage, req: &FileChooserReq
     let mut top = DBusMessageIter::new();
     (lib.message_iter_init_append)(msg, &mut top);
 
-    // parent_window: empty -> chooser is unparented (floats). Proper x11:/
-    // wayland: parenting is a later refinement.
+    // parent_window: empty -> the chooser floats instead of being modal over
+    // the app window. Proper parenting needs an `x11:<xid>` or `wayland:<handle>`
+    // identifier; the Wayland handle requires xdg_foreign export support in
+    // Wine's Wayland driver, which doesn't exist yet, so this is deferred.
     append_string(lib, &mut top, "");
     append_string(lib, &mut top, &req.title);
 
