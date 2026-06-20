@@ -190,6 +190,13 @@ fn generate_bindings(root: &str) {
         .clang_arg("-D__fastcall=__attribute__((fastcall))")
         .clang_arg("-D_WIN32")
         .clang_arg("-D__WINE__")
+        // windows.h -> ole2 -> objbase -> combaseapi references IActivationFilter,
+        // which Wine's widl-generated objidlbase.h only declares inside an
+        // `#ifdef USE_COM_CONTEXT_DEF` block (Wine's own COM dlls define it). Without
+        // this, bindgen fails with "unknown type name 'IActivationFilter'".
+        // NB: this requires the generated Wine headers to be up to date with their
+        // .idl sources, i.e. Wine must have been built (widl regenerates the headers).
+        .clang_arg("-DUSE_COM_CONTEXT_DEF")
         .generate()
     {
         Ok(bindings) => bindings,

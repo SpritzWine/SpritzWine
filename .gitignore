@@ -1,4 +1,7 @@
 
+# Claude Code agent memory (local, not part of the project)
+memory/
+
 rust/target/
 rust/Cargo.lock
 rust/src_lib/generated/
