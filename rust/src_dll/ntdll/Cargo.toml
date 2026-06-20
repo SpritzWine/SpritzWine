@@ -1,0 +1,13 @@
+[package]
+name = "wine_ntdll"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Rust implementations of ntdll internals, linked into ntdll's unix lib.
+# Deliberately has NO dependency on the other Wine dlls (unlike wine_api), so it
+# builds standalone *before* Wine and links into ntdll without a build/link cycle.
+[lib]
+name = "wine_ntdll"
+crate-type = ["cdylib"]
+path = "src/lib.rs"

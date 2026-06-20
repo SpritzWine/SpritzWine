@@ -13,6 +13,7 @@ wine_api = {path = "src_lib"}
 [workspace]
 members = [
 "src_lib",
+"src_dll/ntdll",
 "tests",
 "examples",
 
