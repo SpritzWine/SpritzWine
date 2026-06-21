@@ -1,0 +1,56 @@
+# Woodpecker CI (Codeberg): build SpritzWine in new-WoW64 mode and, on tags,
+# publish the relocatable tarball as a release asset. Mirrors the local flow
+# (./build.sh + ./packaging/package.sh).
+#
+# Prerequisites in the Codeberg repo settings:
+#   * Enable Woodpecker CI for the repo.
+#   * Add a secret `codeberg_token` (a Codeberg access token with repo scope) for
+#     the release step.
+# The first run is slow: a full Wine build for both PE arches (~30 min).
+
+when:
+  - event: [tag, manual]
+  - event: push
+    branch: [rust, main]
+
+# Fetch the wine/ submodule along with the repo.
+clone:
+  - name: git
+    image: woodpeckerci/plugin-git
+    settings:
+      recursive: true
+
+steps:
+  - name: build-and-package
+    image: fedora:44
+    environment:
+      LIBCLANG_PATH: /usr/lib64       # bindgen (wine_api) needs libclang
+    commands:
+      # Toolchain. new-WoW64 builds real PE with clang+lld (no mingw) over a single
+      # 64-bit Unix side, so NO 32-bit ELF dev packages are needed.
+      - >
+        dnf install -y gcc make git flex bison file which findutils xz patchelf
+        clang lld llvm-devel clang-devel glibc-devel
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      - . "$HOME/.cargo/env"
+      # x86_64-unknown-linux-gnu is the host default; add the two PE targets for the
+      # PE-side Rust staticlib.
+      - rustup target add i686-pc-windows-gnullvm x86_64-pc-windows-gnullvm
+      # Build + package.
+      - ./build.sh
+      - ./packaging/package.sh
+      - ls -la dist/*.tar.xz
+
+  # Publish the tarball as a Codeberg (Forgejo) release on tags.
+  - name: release
+    image: thegeeklab/wp-gitea-release
+    when:
+      - event: tag
+    settings:
+      base_url: https://codeberg.org
+      api_key:
+        from_secret: codeberg_token
+      files:
+        - dist/*.tar.xz
+      title: SpritzWine ${CI_COMMIT_TAG}
+      note: "Relocatable SpritzWine build (new-WoW64). Extract and run ./spritzwine <program.exe>."

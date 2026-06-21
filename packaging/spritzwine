@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#
+# SpritzWine launcher. Runs the bundled, relocatable Wine from wherever this tree
+# was extracted, so the build works from any path on a compatible host (it links
+# against the host's system libraries, like other portable Wine builds).
+#
+#   spritzwine <program.exe> [args...]     # run a Windows program
+#   spritzwine --version                   # any wine argument works
+#   WINEPREFIX=/path spritzwine wineboot   # override the prefix (default ~/.spritzwine)
+#
+# Or point a Wine prefix manager at this tree's  bin/wine  directly.
+set -u
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+export WINELOADER="$HERE/bin/wine"
+export WINESERVER="$HERE/bin/wineserver"
+# The bundled Rust unix libraries (libwine_ntdll.so, libwine_comdlg32.so) sit next
+# to the unixlibs that DT_NEEDED them. LD_LIBRARY_PATH is searched before the
+# build-tree RUNPATH baked into those unixlibs, so this makes the tree relocatable.
+export LD_LIBRARY_PATH="$HERE/lib/wine/x86_64-unix:$HERE/lib:${LD_LIBRARY_PATH:-}"
+
+export WINEPREFIX="${WINEPREFIX:-$HOME/.spritzwine}"
+
+exec "$HERE/bin/wine" "$@"

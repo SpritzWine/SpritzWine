@@ -2,6 +2,9 @@
 # Claude Code agent memory (local, not part of the project)
 memory/
 
+# packaging output (relocatable tarballs + staging tree)
+dist/
+
 rust/target/
 # stray per-crate target dirs (e.g. from `cargo test` in an excluded crate dir);
 # the real builds use the shared rust/target/

@@ -51,29 +51,18 @@ RUN dnf install -y \
     meson \
     llvm llvm-devel \
     clang clang-devel \
+    lld \
+    patchelf \
+    xz \
     which \
     tldr \
     file \
     python3 \
     python3-pip
 
-RUN dnf install -y \
-    glibc-devel.i686 \
-    libstdc++-devel.i686 \
-    libX11-devel.i686 \
-    freetype-devel.i686 \
-    freetype.i686 \
-    mingw32-freetype.noarch mingw64-freetype.noarch	\
-    mingw32-glib2.noarch mingw32-glib2-static.noarch \
-    graphite2-devel.i686 brotli-devel.i686 \
-    libXrender-devel.i686 \
-    gnutls-devel.i686 nettle-devel.i686 libtasn1-devel.i686 libidn2-devel.i686 p11-kit-devel.i686 \
-    alsa-lib-devel.i686 \
-    bzip2-devel.i686 \
-    libpng-devel.i686 \
-    harfbuzz-devel.i686 \
-    zlib-ng-compat-devel.i686 \
-    && dnf clean all
+# NOTE: new-WoW64 builds real PE (clang+lld) over a single 64-bit Unix side, so it
+# needs NO 32-bit (.i686) ELF dev packages -- the old 32-bit dependency set that used
+# to live here is gone, along with the 32-bit Wayland/pkg-config dance.
 
 # -------------------------------------------------
 # SECTION 2: Install Rust
@@ -90,9 +79,11 @@ ENV PATH="/home/devuser/.cargo/bin:${PATH}"
 # Ensure pip is available for installing Python packages
 ENV PATH="${PATH}:/usr/bin/python3"
 
-# Add i686 target and set as default
-RUN rustup target add i686-unknown-linux-gnu
-ENV CARGO_BUILD_TARGET=i686-unknown-linux-gnu
+# Rust targets for new-WoW64: x86_64-unknown-linux-gnu (the host default) carries the
+# Unix-side cdylibs; the two PE targets carry the PE-side staticlib. No
+# CARGO_BUILD_TARGET override -- rust/.cargo/config.toml pins the host triple, and an
+# env override here would force the wrong target.
+RUN rustup target add i686-pc-windows-gnullvm x86_64-pc-windows-gnullvm
 
 # Install mistral-vibe during the Docker build process
 RUN pip install mistral-vibe
