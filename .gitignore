@@ -5,6 +5,9 @@ memory/
 # packaging output (relocatable tarballs + staging tree)
 dist/
 
+# installer build output (core + gui are standalone crates with their own target dirs)
+installer/*/target/
+
 rust/target/
 # stray per-crate target dirs (e.g. from `cargo test` in an excluded crate dir);
 # the real builds use the shared rust/target/

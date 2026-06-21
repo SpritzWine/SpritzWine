@@ -31,14 +31,17 @@ for so in libwine_ntdll.so libwine_comdlg32.so; do
     [ -f "$RUST_DEPS/$so" ] || { echo "error: missing $RUST_DEPS/$so -- run ./build.sh." >&2; exit 1; }
 done
 
-echo "==> [1/4] Installing Wine into a staging prefix"
+echo "==> [1/5] Installing Wine into a staging prefix"
 rm -rf "$STAGE" "$TREE"
 make -C "$ROOT/wine" install DESTDIR="$STAGE" >/dev/null
 mkdir -p "$TREE"
 cp -a "$STAGE/usr/local/." "$TREE/"
 rm -rf "$TREE/include" "$TREE/share/man"   # runtime needs neither dev headers nor man pages
+# new-WoW64 ships only bin/wine (the 64-bit loader runs both 32- and 64-bit apps); some
+# launchers/tools still expect bin/wine64, so provide it as a compat symlink.
+ln -sf wine "$TREE/bin/wine64"
 
-echo "==> [2/4] Bundling the Rust unix libraries"
+echo "==> [2/5] Bundling the Rust unix libraries"
 install -m644 "$RUST_DEPS/libwine_ntdll.so" "$RUST_DEPS/libwine_comdlg32.so" "$TREE/$UNIXDIR/"
 # Optional tidy-up: rewrite the leftover absolute build-tree RUNPATH to $ORIGIN so
 # the libs are self-locating even without the launcher. Best-effort -- the
@@ -59,15 +62,36 @@ if command -v strip >/dev/null 2>&1; then
     done
 fi
 
-echo "==> [3/4] Adding the launcher"
+echo "==> [3/5] Adding the launcher"
 install -m755 "$ROOT/packaging/spritzwine" "$TREE/spritzwine"
 
-echo "==> [4/4] Creating the tarball"
+echo "==> [4/5] Building and bundling the installer"
+# The headless CLI (installer/core) has no GUI dependencies, so it is always bundled --
+# it guarantees a scriptable install path on any host.
+( cd "$ROOT/installer/core" && cargo build --release )
+install -m755 "$ROOT/installer/core/target/release/spritzwine-cli-install" "$TREE/spritzwine-cli-install"
+# The graphical installer (installer/gui, libcosmic) is bundled unless WITH_INSTALLER=no --
+# building it needs the libcosmic system deps (see installer/README.md).
+if [ "${WITH_INSTALLER:-yes}" != "no" ]; then
+    ( cd "$ROOT/installer/gui" && cargo build --release )
+    install -m755 "$ROOT/installer/gui/target/release/spritzwine-setup" "$TREE/spritzwine-setup"
+else
+    echo "    WITH_INSTALLER=no -> skipping the GUI (headless spritzwine-cli-install still bundled)"
+fi
+if command -v strip >/dev/null 2>&1; then
+    for b in spritzwine-cli-install spritzwine-setup; do
+        [ -f "$TREE/$b" ] && strip --strip-unneeded "$TREE/$b" 2>/dev/null || true
+    done
+fi
+
+echo "==> [5/5] Creating the tarball"
 TARBALL="$DIST/$NAME-x86_64.tar.xz"
 tar -C "$DIST" -caf "$TARBALL" "$NAME"
 
 cat <<EOF
 
 ✅ Packaged: $TARBALL  ($(du -sh "$TARBALL" | cut -f1))
-   Try it:  tar -C /tmp -xf "$TARBALL" && /tmp/$NAME/spritzwine --version
+   Try it:    tar -C /tmp -xf "$TARBALL" && /tmp/$NAME/spritzwine --version
+   Install:   /tmp/$NAME/spritzwine-setup           # graphical installer (Steam/Lutris/prefix)
+              /tmp/$NAME/spritzwine-cli-install --help   # headless equivalent
 EOF

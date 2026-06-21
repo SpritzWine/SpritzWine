@@ -27,10 +27,15 @@ steps:
       LIBCLANG_PATH: /usr/lib64       # bindgen (wine_api) needs libclang
     commands:
       # Toolchain. new-WoW64 builds real PE with clang+lld (no mingw) over a single
-      # 64-bit Unix side, so NO 32-bit ELF dev packages are needed.
+      # 64-bit Unix side, so NO 32-bit ELF dev packages are needed. The trailing block
+      # (libxkbcommon..expat) is for the libcosmic graphical installer that package.sh
+      # builds and bundles (see installer/README.md).
       - >
-        dnf install -y gcc make git flex bison file which findutils xz patchelf
+        dnf install -y gcc gcc-c++ make git flex bison file which findutils xz patchelf
         clang lld llvm-devel clang-devel glibc-devel
+        libxkbcommon-devel libxkbcommon-x11-devel wayland-devel
+        mesa-libgbm-devel mesa-libGL-devel mesa-libEGL-devel vulkan-loader-devel
+        fontconfig-devel freetype-devel expat-devel pkgconf-pkg-config
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
       - . "$HOME/.cargo/env"
       # x86_64-unknown-linux-gnu is the host default; add the two PE targets for the

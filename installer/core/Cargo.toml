@@ -1,0 +1,25 @@
+# SpritzWine installer -- core logic (no GUI dependencies).
+#
+# Deliberately a STANDALONE crate (not a member of the rust/ Wine workspace, and not
+# sharing a workspace/lockfile with installer/gui): the heavy libcosmic/winit/wgpu dep
+# tree lives only in installer/gui, so this crate -- and its tests -- build with a plain
+# host toolchain. It ships a small headless CLI (`spritzwine-cli-install`) alongside the lib,
+# which the GUI (`spritzwine-setup`) reuses for the actual deploy work.
+[package]
+name = "spritzwine-install-core"
+version = "0.1.0"
+edition = "2021"
+description = "Detect Steam/Lutris and deploy a relocatable SpritzWine build (installer core)"
+license = "LGPL-2.1-or-later"
+publish = false
+
+[lib]
+name = "spritzwine_install_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "spritzwine-cli-install"
+path = "src/bin/cli.rs"
+
+[dependencies]
+anyhow = "1"

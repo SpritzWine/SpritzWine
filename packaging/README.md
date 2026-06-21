@@ -23,6 +23,21 @@ WINEPREFIX=~/games/foo spritzwine-*/spritzwine setup.exe
 
 Or point any Wine prefix manager at the extracted tree's `bin/wine`.
 
+## Installing it into Steam / Lutris
+
+The tarball also bundles an installer that registers this build with Steam (as a Steam Play
+compatibility tool), with Lutris (as a Wine runner), into a custom location, or into a fresh
+`WINEPREFIX`:
+
+```bash
+spritzwine-<ver>/spritzwine-setup           # graphical (libcosmic)
+spritzwine-<ver>/spritzwine-cli-install --help  # headless equivalent
+```
+
+See [`../installer/`](../installer) for details. `package.sh` builds and bundles it; set
+`WITH_INSTALLER=no` to package without the GUI (the headless `spritzwine-cli-install` is still
+included).
+
 ## How it stays relocatable
 
 Wine's loader locates `lib/wine` and `share/wine` relative to `bin/wine`, so the

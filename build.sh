@@ -24,33 +24,14 @@ JOBS="${JOBS:-$(nproc)}"
 # real PE (built by clang+lld -- no mingw needed) over a single 64-bit Unix side.
 # That is what --enable-archs=i386,x86_64 selects. The Rust crates retarget to match
 # (Unix cdylibs -> x86_64 host; PE staticlib -> {i686,x86_64}-pc-windows-gnullvm).
-# Headless/lean by default; a host-arch display driver + fonts are a follow-up.
-CONFIGURE_FLAGS="${CONFIGURE_FLAGS:---enable-archs=i386,x86_64 --without-x --without-freetype}"
-
-# Under new-WoW64 the display driver is built host-arch (x86_64), so the old 32-bit
-# wayland/xkb pkg-config dance is obsolete: a 64-bit winewayland.drv just needs the
-# normal (64-bit) wayland dev files, which configure finds on the default path. The
-# legacy 32-bit probe below is kept but dormant (default off); set WITH_WAYLAND=auto
-# to re-run it. Enabling a host-arch GUI driver is a follow-up.
-WITH_WAYLAND="${WITH_WAYLAND:-no}"
-
-detect_wayland_pkgconfig() {
-    local dir
-    for dir in /usr/lib/pkgconfig /usr/lib32/pkgconfig /usr/lib/i386-linux-gnu/pkgconfig; do
-        [ -d "$dir" ] || continue
-        # --cflags --libs resolves Requires.private too, so this only succeeds
-        # when the whole 32-bit closure (libffi, libxml-2.0, liblzma, zlib, …) is
-        # installed. Restricting PKG_CONFIG_LIBDIR mirrors Wine's own configure,
-        # so it won't false-positive on 64-bit-only .pc files.
-        if PKG_CONFIG_LIBDIR="$dir:/usr/share/pkgconfig" pkg-config --cflags --libs \
-               wayland-client wayland-egl wayland-cursor xkbcommon xkbregistry \
-               >/dev/null 2>&1; then
-            echo "$dir"
-            return 0
-        fi
-    done
-    return 1
-}
+#
+# GRAPHICAL by default: configure auto-enables the X11 + Wayland display drivers and
+# FreeType font rendering when their (64-bit, host-arch) dev files are present -- which is
+# what a build people actually run GUI apps/games with needs. (Without FreeType, Wine has
+# no font backend and dialogs collapse to a few pixels.) Under new-WoW64 the drivers are
+# host-arch, so the old 32-bit wayland/xkb pkg-config dance is gone. For a lean headless
+# build, set CONFIGURE_FLAGS to add --without-x --without-freetype.
+CONFIGURE_FLAGS="${CONFIGURE_FLAGS:---enable-archs=i386,x86_64}"
 
 echo "==> [1/6] Fetching the Wine submodule"
 git submodule update --init --recursive
@@ -60,15 +41,7 @@ cd "$ROOT/wine"
 if [ -f Makefile ] && [ Makefile -nt configure ]; then
     echo "    wine/Makefile is up to date; skipping configure."
 else
-    # Enable the Wayland driver if its 32-bit dev files are present.
-    if [ "$WITH_WAYLAND" != "no" ] && command -v pkg-config >/dev/null 2>&1 \
-       && wl_pcdir="$(detect_wayland_pkgconfig)"; then
-        echo "    Wayland 32-bit dev files found ($wl_pcdir); enabling winewayland.drv."
-        export PKG_CONFIG_PATH="$wl_pcdir${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    else
-        echo "    No Wayland 32-bit dev files; configuring headless (no display driver)."
-    fi
-    echo "    Running configure..."
+    echo "    Running configure (graphical: X11 + Wayland + FreeType when dev files present)..."
     # shellcheck disable=SC2086
     ./configure $CONFIGURE_FLAGS
 fi

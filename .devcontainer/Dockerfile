@@ -64,6 +64,21 @@ RUN dnf install -y \
 # needs NO 32-bit (.i686) ELF dev packages -- the old 32-bit dependency set that used
 # to live here is gone, along with the 32-bit Wayland/pkg-config dance.
 
+# Dependencies for the libcosmic graphical installer (installer/gui). The headless
+# installer (installer/core) needs none of these; only the GUI does.
+RUN dnf install -y \
+    gcc-c++ \
+    libxkbcommon-devel \
+    libxkbcommon-x11-devel \
+    wayland-devel \
+    mesa-libgbm-devel \
+    mesa-libGL-devel \
+    mesa-libEGL-devel \
+    vulkan-loader-devel \
+    fontconfig-devel \
+    expat-devel \
+    pkgconf-pkg-config
+
 # -------------------------------------------------
 # SECTION 2: Install Rust
 # -------------------------------------------------
