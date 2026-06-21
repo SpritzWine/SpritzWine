@@ -1,5 +1,11 @@
+# Pin the Unix-side build to the x86_64 host triple. Under new-WoW64 the unixlibs are
+# 64-bit, so the cdylibs (wine_ntdll, wine_comdlg32) target x86_64-unknown-linux-gnu;
+# pinning it (vs. relying on the host default) keeps cargo's output under the
+# `target/<triple>/release/deps` layout that Wine's RUST_TARGET paths + winegcc expect.
+# The PE-side staticlib (wine_ntdll_pe) overrides this with an explicit
+# `--target {i686,x86_64}-pc-windows-gnullvm` (see build.sh) -- it must be real PE.
 [build]
-target = "i686-unknown-linux-gnu"
+target = "x86_64-unknown-linux-gnu"
 
 [alias]
 dir = "run -p rust-dir --bin dir"

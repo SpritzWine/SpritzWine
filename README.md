@@ -50,10 +50,13 @@ you need: a Rust toolchain with the **`i686-unknown-linux-gnu`** target
 build dependencies, and 32-bit dev libraries. See `rust/README.md` and
 `rust/LIBCLANG_INSTALLATION_GUIDE.md` for specifics.
 
-> **Note:** Wine is built **32-bit (i386)** so its `HOST_ARCH` matches the i686
-> Rust target pinned in `rust/.cargo/config.toml`. `build.sh` configures with
-> `--disable-win64` for this reason. Override with `CONFIGURE_FLAGS=…` and
-> parallelism with `JOBS=…`.
+> **Note:** Wine is built in **new-WoW64** mode (`--enable-archs=i386,x86_64`): a
+> 64-bit host that also builds 32-bit PE, so it runs both 64- and 32-bit Windows
+> apps. The DLLs are real PE (built with clang+lld — no mingw needed) over a single
+> 64-bit Unix side. The Rust crates retarget to match: the Unix-side cdylibs to
+> `x86_64-unknown-linux-gnu` (pinned in `rust/.cargo/config.toml`), and the PE-side
+> staticlib to `{i686,x86_64}-pc-windows-gnullvm`. Override flags with
+> `CONFIGURE_FLAGS=…` and parallelism with `JOBS=…`.
 
 ## How the build fits together
 
@@ -66,7 +69,9 @@ in `build.sh` matters:
    headers (`include/*.h` from `*.idl`). ntdll links `libwine_ntdll` here.
 3. **`wine_api` after that.** Its bindgen step parses those generated headers, so it
    can only run once step 2 has produced them.
-4. **`make` (programs + loader) last.** Wine's `ping` example links `wine_api`.
+4. **`make` (programs + loader) last.** (The `ping` `-mwinerust` example that linked
+   `wine_api` is disabled under new-WoW64 — a real-PE program can't link the ELF
+   `wine_api` cdylib; reworking that path is a follow-up.)
 
 The DLL crates are wired in via a shared `WINE_RUST_LDFLAGS` (rpath + library search
 path, set in Wine's `configure.ac`); each DLL's `Makefile.in` appends its own

@@ -19,13 +19,15 @@
 //! port of Wine's `lznt1_decompress_chunk` (the part that walks attacker-supplied
 //! tokens and does overlapping back-copies).
 
-use alloc::vec;
-use alloc::vec::Vec;
-
 use crate::status::{STATUS_BAD_COMPRESSION_BUFFER, STATUS_BUFFER_TOO_SMALL, STATUS_SUCCESS};
 
 /// LZNT1 chunk size (4096 bytes of uncompressed data per chunk).
 const CHUNK: usize = 0x1000;
+
+/// Upper bound on the token bytes one chunk can produce: the all-literal worst case
+/// is the literals plus one flag byte per group of 8. Sizes the compressor's fixed
+/// stack scratch so it never needs to allocate.
+const MAX_CHUNK_OUT: usize = CHUNK + CHUNK / 8 + 1;
 
 // Match finder tuning. Chains are confined to a single 4096-byte chunk, so a
 // modest table and a bounded walk keep the worst case in check without hurting
@@ -114,39 +116,42 @@ fn find_match(input: &[u8], head: &[i32], prev: &[i32], pos: usize) -> (usize, u
     }
 }
 
-/// Compress one chunk (`input.len() <= CHUNK`) into a fresh buffer of compressed
-/// tokens. The caller decides whether this is smaller than storing `input` raw.
-fn compress_chunk(input: &[u8]) -> Vec<u8> {
+/// Compress one chunk (`input.len() <= CHUNK`) into `out`, returning the number of
+/// token bytes written. `head`/`prev` are scratch hash chains the caller resets
+/// (`head` all -1, `prev[..input.len()]` -1); `out` must hold [`MAX_CHUNK_OUT`]
+/// bytes. The caller decides whether the result is smaller than storing `input` raw.
+fn compress_chunk(input: &[u8], head: &mut [i32], prev: &mut [i32], out: &mut [u8]) -> usize {
     let n = input.len();
-    let mut out = Vec::with_capacity(n);
-    let mut head = vec![-1i32; HASH_SIZE];
-    let mut prev = vec![-1i32; n.max(1)];
+    let mut oi = 0usize;
 
     let mut pos = 0usize;
     while pos < n {
-        let flag_index = out.len();
-        out.push(0u8); // placeholder; filled in once the group is complete
+        let flag_index = oi;
+        out[oi] = 0; // placeholder; filled in once the group is complete
+        oi += 1;
         let mut flags = 0u8;
 
         for bit in 0..8u32 {
             if pos >= n {
                 break;
             }
-            let (best_len, best_disp) = find_match(input, &head, &prev, pos);
+            let (best_len, best_disp) = find_match(input, head, prev, pos);
             if best_len >= MIN_MATCH {
                 let db = displacement_bits(pos);
                 let length_bits = 16 - db;
                 let code = (((best_disp - 1) as u32) << length_bits) | ((best_len - MIN_MATCH) as u32);
-                out.push((code & 0xff) as u8);
-                out.push((code >> 8) as u8);
+                out[oi] = (code & 0xff) as u8;
+                out[oi + 1] = (code >> 8) as u8;
+                oi += 2;
                 flags |= 1 << bit;
                 for j in pos..pos + best_len {
-                    insert_pos(input, &mut head, &mut prev, j);
+                    insert_pos(input, head, prev, j);
                 }
                 pos += best_len;
             } else {
-                out.push(input[pos]);
-                insert_pos(input, &mut head, &mut prev, pos);
+                out[oi] = input[pos];
+                oi += 1;
+                insert_pos(input, head, prev, pos);
                 pos += 1;
             }
         }
@@ -154,24 +159,34 @@ fn compress_chunk(input: &[u8]) -> Vec<u8> {
         out[flag_index] = flags;
     }
 
-    out
+    oi
 }
 
 /// Compress `src` into `dst` using LZNT1; returns the number of bytes written.
 fn lznt1_compress(src: &[u8], dst: &mut [u8]) -> Result<usize, i32> {
+    // Fixed scratch sized for the worst case so the compressor never allocates --
+    // this lib links into a real-PE ntdll with no C runtime/heap. The ~52 KB frame
+    // is stack-probed by ntdll's own __chkstk.
+    let mut head = [-1i32; HASH_SIZE];
+    let mut prev = [-1i32; CHUNK];
+    let mut cbuf = [0u8; MAX_CHUNK_OUT];
+
     let mut written = 0usize;
     let mut off = 0usize;
 
     while off < src.len() {
         let chunk_len = (src.len() - off).min(CHUNK);
         let chunk = &src[off..off + chunk_len];
-        let compressed = compress_chunk(chunk);
+
+        head.fill(-1);
+        prev[..chunk_len].fill(-1);
+        let clen = compress_chunk(chunk, &mut head, &mut prev, &mut cbuf);
 
         // Only keep the compressed form if it actually saved space; otherwise the
         // chunk is stored raw (an uncompressed chunk decodes the same on any LZNT1
         // decompressor, Wine's or Windows').
-        let (compressed_flag, data): (u16, &[u8]) = if compressed.len() < chunk_len {
-            (0x8000, &compressed)
+        let (compressed_flag, data): (u16, &[u8]) = if clen < chunk_len {
+            (0x8000, &cbuf[..clen])
         } else {
             (0x0000, chunk)
         };
