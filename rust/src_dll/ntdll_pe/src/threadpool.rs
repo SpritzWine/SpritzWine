@@ -387,6 +387,99 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
     }
 }
 
+// ===========================================================================
+// Threadpool object model + callback dispatch (stage 1c, work/simple path).
+//
+// The Rust-native replacement for the C `struct threadpool_object` and the
+// `tp_object_execute` callback switch, for the TP_OBJECT_TYPE_SIMPLE / WORK
+// types. Timer/Wait/IO variants (and their event-source service threads) arrive
+// in stages 2-4; the refcount-lifecycle + finalization + the TpCallback* cleanup
+// API are completed alongside the wine wiring.
+// ===========================================================================
+
+/// `CALLBACK`-ABI work callback: `void(PTP_CALLBACK_INSTANCE, PVOID context, PTP_WORK)`.
+pub type WorkCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void);
+/// `CALLBACK`-ABI simple callback: `void(PTP_CALLBACK_INSTANCE, PVOID context)`.
+pub type SimpleCallback = extern "system" fn(*mut CallbackInstance, *mut c_void);
+
+/// The callback and its type, stored per object (the C `union u` + `type` tag,
+/// for the work/simple subset).
+pub enum Callback {
+    Simple(SimpleCallback),
+    Work(WorkCallback),
+}
+
+/// Per-callback `TP_CALLBACK_INSTANCE`. Minimal for now -- enough to pass to the
+/// callback; the TpCallback* cleanup/finalization slots are added with that API.
+#[repr(C)]
+pub struct CallbackInstance {
+    object: *mut ThreadpoolObject,
+    may_run_long: bool,
+}
+
+/// Rust-native threadpool object (work/simple).
+pub struct ThreadpoolObject {
+    sched: SchedState,
+    callback: Callback,
+    userdata: *mut c_void,
+    may_run_long: bool,
+    /// Object lifetime refcount (C `object->refcount`): +1 per pending callback,
+    /// -1 after each runs; the allocation is freed at 0. Read once the release
+    /// path is wired (refcount sub-slice of 1c).
+    #[allow(dead_code)]
+    refcount: AtomicI32,
+}
+
+unsafe impl Scheduled for ThreadpoolObject {
+    fn sched_state(&self) -> &SchedState {
+        &self.sched
+    }
+}
+
+// Shared across worker threads (as the C object is): `userdata`/`callback` are
+// read-only after construction and the scheduling state is atomic.
+unsafe impl Send for ThreadpoolObject {}
+unsafe impl Sync for ThreadpoolObject {}
+
+impl ThreadpoolObject {
+    pub fn new_work(callback: WorkCallback, userdata: *mut c_void, priority: u8) -> Self {
+        ThreadpoolObject {
+            sched: SchedState::new(priority),
+            callback: Callback::Work(callback),
+            userdata,
+            may_run_long: false,
+            refcount: AtomicI32::new(0),
+        }
+    }
+    pub fn new_simple(callback: SimpleCallback, userdata: *mut c_void, priority: u8) -> Self {
+        ThreadpoolObject {
+            sched: SchedState::new(priority),
+            callback: Callback::Simple(callback),
+            userdata,
+            may_run_long: false,
+            refcount: AtomicI32::new(0),
+        }
+    }
+}
+
+/// Run one callback for `obj` (the Rust `tp_object_execute`, work/simple). This
+/// is the `Pool::run` seam for `Pool<ThreadpoolObject, _>`.
+///
+/// # Safety
+/// `obj` must point to a live [`ThreadpoolObject`] for the callback's duration.
+pub fn dispatch_object(obj: *mut ThreadpoolObject) {
+    // SAFETY: live for the callback per the scheduler's contract.
+    let o = unsafe { &*obj };
+    let mut instance = CallbackInstance { object: obj, may_run_long: o.may_run_long };
+    let inst = &mut instance as *mut CallbackInstance;
+    match o.callback {
+        Callback::Simple(cb) => cb(inst, o.userdata),
+        Callback::Work(cb) => cb(inst, o.userdata, obj.cast()),
+    }
+    // (1c later: finalization callback, instance cleanup tasks, simple-object
+    // auto-shutdown, and the refcount release.)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -562,7 +655,12 @@ mod tests {
             let done = done.clone();
             handles.push(thread::spawn(move || {
                 // Spin-bounded: a lost callback would otherwise hang; cap idle
-                // spins so a bug fails instead of deadlocking the test.
+                // spins so a bug fails instead of deadlocking the test. Every
+                // dequeued object MUST be run -- never discard a `Some` (that
+                // would itself lose a callback). Once producers are done, an empty
+                // queue means we are finished: any in-flight re-queue is owned by
+                // the worker still in its `Some` branch, which drains it before it
+                // too observes an empty queue.
                 let mut idle: u64 = 0;
                 loop {
                     match unsafe { sched.worker_take::<TestObj>() } {
@@ -572,10 +670,7 @@ mod tests {
                         }
                         None => {
                             if done.load(Ordering::Acquire) {
-                                // Final confirm-empty pass.
-                                if unsafe { sched.worker_take::<TestObj>() }.is_none() {
-                                    break;
-                                }
+                                break;
                             }
                             idle += 1;
                             assert!(idle < 2_000_000_000, "worker spun forever -- lost callback");
@@ -682,5 +777,72 @@ mod tests {
         // Teardown: join every worker thread before the pool/objects drop.
         pool_ref.shutdown();
         assert_eq!(pool_ref.num_workers(), 0, "workers left after shutdown");
+    }
+
+    /// Real work callback: records its run through `userdata` and checks it got a
+    /// non-null work handle (the object pointer).
+    extern "system" fn count_work_cb(
+        _inst: *mut CallbackInstance,
+        userdata: *mut c_void,
+        work: *mut c_void,
+    ) {
+        assert!(!work.is_null(), "work handle must be non-null");
+        unsafe { (*(userdata as *const AtomicI32)).fetch_add(1, Ordering::Relaxed) };
+    }
+
+    /// End-to-end: ThreadpoolObjects carrying real `extern "system"` work
+    /// callbacks flow Pool::submit -> scheduler -> worker -> dispatch_object ->
+    /// the callback, with the right userdata and work handle, exactly once each.
+    #[test]
+    fn work_objects_dispatch_real_callbacks() {
+        const OBJECTS: usize = 12;
+        const PRODUCERS: usize = 3;
+        const PER_PRODUCER: usize = 5_000;
+
+        let counters: Vec<AtomicI32> = (0..OBJECTS).map(|_| AtomicI32::new(0)).collect();
+        let objs: Vec<Box<ThreadpoolObject>> = (0..OBJECTS)
+            .map(|i| {
+                let ud = &counters[i] as *const AtomicI32 as *mut c_void;
+                Box::new(ThreadpoolObject::new_work(count_work_cb, ud, (i % 3) as u8))
+            })
+            .collect();
+        let submitted: Vec<AtomicI32> = (0..OBJECTS).map(|_| AtomicI32::new(0)).collect();
+
+        let pool = Box::new(Pool::new(TestOs::new(), dispatch_object as fn(*mut ThreadpoolObject)));
+        pool.set_min_workers(1);
+        let pool: Box<Pool<ThreadpoolObject, TestOs>> = pool;
+        let pool_ref: &Pool<ThreadpoolObject, TestOs> = &pool;
+        pool_ref.obj_added();
+        pool_ref.ensure_started();
+
+        thread::scope(|s| {
+            for p in 0..PRODUCERS {
+                let submitted = &submitted;
+                let objs_ref = &objs;
+                s.spawn(move || {
+                    for i in 0..PER_PRODUCER {
+                        let idx = (p * 5 + i * 11) % OBJECTS;
+                        submitted[idx].fetch_add(1, Ordering::Relaxed);
+                        let ptr = Box::as_ref(&objs_ref[idx]) as *const ThreadpoolObject
+                            as *mut ThreadpoolObject;
+                        unsafe { pool_ref.submit(ptr) };
+                    }
+                });
+            }
+        });
+
+        let total: i32 = submitted.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+        spin_until(
+            || counters.iter().map(|c| c.load(Ordering::Relaxed)).sum::<i32>() == total,
+            "dispatch drain",
+        );
+        for i in 0..OBJECTS {
+            assert_eq!(
+                counters[i].load(Ordering::Relaxed),
+                submitted[i].load(Ordering::Relaxed),
+                "object {i} callback count != submitted"
+            );
+        }
+        pool_ref.shutdown();
     }
 }
