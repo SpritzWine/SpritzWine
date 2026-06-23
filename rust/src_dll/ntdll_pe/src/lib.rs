@@ -58,6 +58,7 @@ pub mod rtl_compress;
 pub mod status;
 pub mod threadpool;
 pub mod unwind;
+pub mod wait_queue;
 pub mod work_queue;
 
 /// Linker anchor for the PE-side static-archive link.

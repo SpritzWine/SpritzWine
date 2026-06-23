@@ -429,13 +429,22 @@ pub type WorkCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *
 pub type SimpleCallback = extern "system" fn(*mut CallbackInstance, *mut c_void);
 /// `CALLBACK`-ABI timer callback: `void(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER)`.
 pub type TimerCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void);
+/// `CALLBACK`-ABI wait callback: `void(PTP_CALLBACK_INSTANCE, PVOID, PTP_WAIT, TP_WAIT_RESULT)`.
+pub type WaitCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void, u32);
+
+/// `TP_WAIT_RESULT` values handed to a wait callback.
+pub const WAIT_OBJECT_0: u32 = 0;
+pub const WAIT_TIMEOUT: u32 = 0x0000_0102;
 
 /// The callback and its type, stored per object (the C `union u` + `type` tag).
-/// Timer scheduling state lives in the [`TimerQueue`], not here (see [`TimerEntry`]).
+/// Timer scheduling state lives in the [`TimerQueue`]; wait scheduling state in
+/// the [`WaitQueue`](crate::wait_queue::WaitQueue) (only the signaled count, used
+/// at dispatch, is on the object).
 pub enum Callback {
     Simple(SimpleCallback),
     Work(WorkCallback),
     Timer(TimerCallback),
+    Wait(WaitCallback),
 }
 
 /// Per-callback `TP_CALLBACK_INSTANCE`. Minimal for now -- enough to pass to the
@@ -446,7 +455,7 @@ pub struct CallbackInstance {
     may_run_long: bool,
 }
 
-/// Rust-native threadpool object (work/simple).
+/// Rust-native threadpool object (the C `struct threadpool_object`).
 pub struct ThreadpoolObject {
     sched: SchedState,
     callback: Callback,
@@ -457,6 +466,10 @@ pub struct ThreadpoolObject {
     /// path is wired (refcount sub-slice of 1c).
     #[allow(dead_code)]
     refcount: AtomicI32,
+    /// Wait objects: count of signaled (vs timed-out) callbacks owed, set by the
+    /// [`WaitQueue`](crate::wait_queue::WaitQueue) and consumed at dispatch to
+    /// pick `WAIT_OBJECT_0` vs `WAIT_TIMEOUT` (C `object->u.wait.signaled`).
+    pub(crate) signaled: AtomicI32,
 }
 
 unsafe impl Scheduled for ThreadpoolObject {
@@ -471,32 +484,27 @@ unsafe impl Send for ThreadpoolObject {}
 unsafe impl Sync for ThreadpoolObject {}
 
 impl ThreadpoolObject {
-    pub fn new_work(callback: WorkCallback, userdata: *mut c_void, priority: u8) -> Self {
+    fn with_callback(callback: Callback, userdata: *mut c_void, priority: u8) -> Self {
         ThreadpoolObject {
             sched: SchedState::new(priority),
-            callback: Callback::Work(callback),
+            callback,
             userdata,
             may_run_long: false,
             refcount: AtomicI32::new(0),
+            signaled: AtomicI32::new(0),
         }
+    }
+    pub fn new_work(callback: WorkCallback, userdata: *mut c_void, priority: u8) -> Self {
+        Self::with_callback(Callback::Work(callback), userdata, priority)
     }
     pub fn new_simple(callback: SimpleCallback, userdata: *mut c_void, priority: u8) -> Self {
-        ThreadpoolObject {
-            sched: SchedState::new(priority),
-            callback: Callback::Simple(callback),
-            userdata,
-            may_run_long: false,
-            refcount: AtomicI32::new(0),
-        }
+        Self::with_callback(Callback::Simple(callback), userdata, priority)
     }
     pub fn new_timer(callback: TimerCallback, userdata: *mut c_void, priority: u8) -> Self {
-        ThreadpoolObject {
-            sched: SchedState::new(priority),
-            callback: Callback::Timer(callback),
-            userdata,
-            may_run_long: false,
-            refcount: AtomicI32::new(0),
-        }
+        Self::with_callback(Callback::Timer(callback), userdata, priority)
+    }
+    pub fn new_wait(callback: WaitCallback, userdata: *mut c_void, priority: u8) -> Self {
+        Self::with_callback(Callback::Wait(callback), userdata, priority)
     }
 
     /// Raw object pointer for use as a TP_* handle / scheduler key.
@@ -519,6 +527,18 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
         Callback::Simple(cb) => cb(inst, o.userdata),
         Callback::Work(cb) => cb(inst, o.userdata, obj.cast()),
         Callback::Timer(cb) => cb(inst, o.userdata, obj.cast()),
+        Callback::Wait(cb) => {
+            // One callback per submit; if signaled callbacks remain, consume one
+            // (WAIT_OBJECT_0), else this is a timeout (C tp_object_execute).
+            let prev = o.signaled.fetch_sub(1, Ordering::AcqRel);
+            let result = if prev > 0 {
+                WAIT_OBJECT_0
+            } else {
+                o.signaled.fetch_add(1, Ordering::AcqRel); // restore; was a timeout
+                WAIT_TIMEOUT
+            };
+            cb(inst, o.userdata, obj.cast(), result);
+        }
     }
     // (1c later: finalization callback, instance cleanup tasks, simple-object
     // auto-shutdown, and the refcount release.)
