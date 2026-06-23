@@ -38,17 +38,17 @@ impl Node {
 
 /// Test-and-test-and-set spinlock. The crate is freestanding (no `std::Mutex`),
 /// and a two-lock queue's critical sections are a couple of pointer stores, so a
-/// brief spinlock is the right primitive here.
-struct SpinLock {
+/// brief spinlock is the right primitive here. (Also reused by the timer queue.)
+pub(crate) struct SpinLock {
     locked: AtomicBool,
 }
 
 impl SpinLock {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         SpinLock { locked: AtomicBool::new(false) }
     }
     #[inline]
-    fn lock(&self) {
+    pub(crate) fn lock(&self) {
         while self.locked.swap(true, Ordering::Acquire) {
             while self.locked.load(Ordering::Relaxed) {
                 spin_loop();
@@ -56,7 +56,7 @@ impl SpinLock {
         }
     }
     #[inline]
-    fn unlock(&self) {
+    pub(crate) fn unlock(&self) {
         self.locked.store(false, Ordering::Release);
     }
 }

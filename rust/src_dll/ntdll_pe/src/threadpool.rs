@@ -25,8 +25,10 @@
 //! Slice 1a is pure scheduling and fully unit-testable; worker spawn/terminate
 //! and the callback dispatch (which need FFI) are slices 1b/1c.
 
-use crate::work_queue::{Node, TwoLockQueue};
+use crate::work_queue::{Node, SpinLock, TwoLockQueue};
 use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
@@ -224,6 +226,10 @@ pub trait PoolOs: Sync {
     /// Join all spawned workers (teardown; no-op in the real build, which exits
     /// workers via the thread machinery).
     fn join_all(&self) {}
+    /// Monotonic clock in 100ns units (relative timers; wine: NtQueryPerformanceCounter).
+    fn now_mono_100ns(&self) -> i64;
+    /// Wall-clock in 100ns units (absolute timers; wine: NtQuerySystemTime).
+    fn now_system_100ns(&self) -> i64;
 }
 
 /// The NT threadpool's worker-management half (stage 1b): atomic worker counts +
@@ -421,12 +427,15 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
 pub type WorkCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void);
 /// `CALLBACK`-ABI simple callback: `void(PTP_CALLBACK_INSTANCE, PVOID context)`.
 pub type SimpleCallback = extern "system" fn(*mut CallbackInstance, *mut c_void);
+/// `CALLBACK`-ABI timer callback: `void(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER)`.
+pub type TimerCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void);
 
-/// The callback and its type, stored per object (the C `union u` + `type` tag,
-/// for the work/simple subset).
+/// The callback and its type, stored per object (the C `union u` + `type` tag).
+/// Timer scheduling state lives in the [`TimerQueue`], not here (see [`TimerEntry`]).
 pub enum Callback {
     Simple(SimpleCallback),
     Work(WorkCallback),
+    Timer(TimerCallback),
 }
 
 /// Per-callback `TP_CALLBACK_INSTANCE`. Minimal for now -- enough to pass to the
@@ -480,6 +489,20 @@ impl ThreadpoolObject {
             refcount: AtomicI32::new(0),
         }
     }
+    pub fn new_timer(callback: TimerCallback, userdata: *mut c_void, priority: u8) -> Self {
+        ThreadpoolObject {
+            sched: SchedState::new(priority),
+            callback: Callback::Timer(callback),
+            userdata,
+            may_run_long: false,
+            refcount: AtomicI32::new(0),
+        }
+    }
+
+    /// Raw object pointer for use as a TP_* handle / scheduler key.
+    pub fn as_ptr(&self) -> *mut ThreadpoolObject {
+        self as *const ThreadpoolObject as *mut ThreadpoolObject
+    }
 }
 
 /// Run one callback for `obj` (the Rust `tp_object_execute`, work/simple). This
@@ -495,9 +518,238 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     match o.callback {
         Callback::Simple(cb) => cb(inst, o.userdata),
         Callback::Work(cb) => cb(inst, o.userdata, obj.cast()),
+        Callback::Timer(cb) => cb(inst, o.userdata, obj.cast()),
     }
     // (1c later: finalization callback, instance cleanup tasks, simple-object
     // auto-shutdown, and the refcount release.)
+}
+
+// ===========================================================================
+// Timer queue (stage 2): Rust replacement for the global `timerqueue` +
+// timerqueue_thread_proc + tp_timerqueue_lock/unlock + TpSetTimer's scheduling.
+//
+// A service thread sleeps until the next armed timer's deadline (or until
+// set_timer wakes it), fires expired timers via `on_expire` (the wiring points
+// this at Pool::submit), and re-arms periodic ones. It stays alive while any
+// timer object is bound (objcount), exactly like the C.
+//
+// Fidelity note: the C drives this with NT waitable-timer kernel objects; here
+// it is a portable clock+futex. A lost futex wake can make a freshly-set earlier
+// timer fire late, so sleeps are capped (TIMER_MAX_SLEEP) to bound that. Replace
+// with NtCreateTimer/NtSetTimer for exactness later.
+// ===========================================================================
+
+/// Which clock a timer's deadline is measured against.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Clock {
+    /// Monotonic (relative timeouts; C `rel_timers` / NtQueryPerformanceCounter).
+    Mono,
+    /// Wall-clock (absolute timeouts; C `abs_timers` / NtQuerySystemTime).
+    System,
+}
+
+/// One armed timer -- the C `u.timer` scheduling state, owned by the queue.
+struct TimerEntry {
+    obj: *mut ThreadpoolObject,
+    deadline: i64, // absolute, in `clock`'s 100ns units
+    clock: Clock,
+    period_ms: i32, // 0 = one-shot
+    #[allow(dead_code)]
+    window_ms: i32, // coalescing window (advisory until update_timers coalescing lands)
+}
+
+/// Cap on a single sleep so a lost wake bounds late-firing (and lets an idle
+/// thread re-poll cheaply) rather than stalling. 50 ms.
+const TIMER_MAX_SLEEP_100NS: i64 = 50 * 10_000;
+
+/// State guarded by `TimerQueue::lock`.
+struct TimerInner {
+    entries: Vec<TimerEntry>,
+    thread_running: bool,
+    objcount: i32, // timer objects bound (keeps the service thread alive)
+}
+
+/// The global timer service.
+pub struct TimerQueue<Os: PoolOs> {
+    lock: SpinLock,
+    inner: UnsafeCell<TimerInner>,
+    /// Futex generation; bumped before each wake (set_timer / obj_removed / shutdown).
+    update: AtomicU32,
+    shutdown: AtomicBool,
+    on_expire: fn(*mut ThreadpoolObject),
+    os: Os,
+}
+
+// Shared between the service thread and the API callers; all `inner` access is
+// under `lock`.
+unsafe impl<Os: PoolOs> Sync for TimerQueue<Os> {}
+unsafe impl<Os: PoolOs> Send for TimerQueue<Os> {}
+
+extern "system" fn timer_service_entry<Os: PoolOs>(arg: *mut c_void) -> u32 {
+    // SAFETY: `arg` is the &TimerQueue passed to spawn; it outlives the thread.
+    let tq = unsafe { &*(arg as *const TimerQueue<Os>) };
+    tq.run_service();
+    0
+}
+
+impl<Os: PoolOs> TimerQueue<Os> {
+    pub fn new(os: Os, on_expire: fn(*mut ThreadpoolObject)) -> Self {
+        TimerQueue {
+            lock: SpinLock::new(),
+            inner: UnsafeCell::new(TimerInner {
+                entries: Vec::new(),
+                thread_running: false,
+                objcount: 0,
+            }),
+            update: AtomicU32::new(0),
+            shutdown: AtomicBool::new(false),
+            on_expire,
+            os,
+        }
+    }
+
+    /// Bind a timer object (C `tp_timerqueue_lock`): ensure the service thread is
+    /// running and account the object so the thread stays alive.
+    pub fn obj_added(&self) {
+        self.lock.lock();
+        // SAFETY: inner is only touched under `lock`.
+        let inner = unsafe { &mut *self.inner.get() };
+        inner.objcount += 1;
+        if !inner.thread_running
+            && self.os.spawn(timer_service_entry::<Os>, self as *const _ as *mut c_void)
+        {
+            inner.thread_running = true;
+        }
+        self.lock.unlock();
+    }
+
+    /// Unbind a timer object (C `tp_timerqueue_unlock`); wake the service so it can
+    /// exit once the last object is gone.
+    pub fn obj_removed(&self) {
+        self.lock.lock();
+        unsafe { &mut *self.inner.get() }.objcount -= 1;
+        self.lock.unlock();
+        self.update.fetch_add(1, Ordering::AcqRel);
+        self.os.futex_wake_one(&self.update);
+    }
+
+    /// Arm / re-arm / disarm a timer (C `TpSetTimer`). `timeout`: `None` disarms;
+    /// `Some(v)` with v>0 = absolute (wall clock), v<0 = relative (monotonic),
+    /// v==0 = fire immediately (and, if periodic, also re-arm). `period_ms`/
+    /// `window_ms` as in TpSetTimer.
+    ///
+    /// # Safety
+    /// `obj` must be a live timer [`ThreadpoolObject`] bound via [`obj_added`].
+    pub unsafe fn set_timer(
+        &self,
+        obj: *mut ThreadpoolObject,
+        timeout: Option<i64>,
+        period_ms: i32,
+        window_ms: i32,
+    ) {
+        let now_mono = self.os.now_mono_100ns();
+        let mut submit_now = false;
+        let mut arm: Option<(i64, Clock)> = None;
+        match timeout {
+            None => {}
+            Some(v) if v > 0 => arm = Some((v, Clock::System)),
+            Some(v) if v < 0 => arm = Some((now_mono - v, Clock::Mono)),
+            Some(_) => {
+                // v == 0: fire now; if periodic, also arm relative to now.
+                submit_now = true;
+                if period_ms != 0 {
+                    arm = Some((now_mono + period_ms as i64 * 10_000, Clock::Mono));
+                }
+            }
+        }
+
+        self.lock.lock();
+        let inner = unsafe { &mut *self.inner.get() };
+        if let Some(pos) = inner.entries.iter().position(|e| e.obj == obj) {
+            inner.entries.swap_remove(pos);
+        }
+        if let Some((deadline, clock)) = arm {
+            inner.entries.push(TimerEntry { obj, deadline, clock, period_ms, window_ms });
+        }
+        self.lock.unlock();
+
+        self.update.fetch_add(1, Ordering::AcqRel);
+        self.os.futex_wake_one(&self.update);
+
+        if submit_now {
+            (self.on_expire)(obj);
+        }
+    }
+
+    /// The service loop (the Rust `timerqueue_thread_proc`).
+    fn run_service(&self) {
+        loop {
+            self.lock.lock();
+            let inner = unsafe { &mut *self.inner.get() };
+            let now_mono = self.os.now_mono_100ns();
+            let now_sys = self.os.now_system_100ns();
+
+            let mut to_fire: Vec<*mut ThreadpoolObject> = Vec::new();
+            let mut i = 0;
+            while i < inner.entries.len() {
+                let now = if inner.entries[i].clock == Clock::Mono { now_mono } else { now_sys };
+                if inner.entries[i].deadline <= now {
+                    to_fire.push(inner.entries[i].obj);
+                    if inner.entries[i].period_ms != 0 {
+                        // Re-arm periodic relative to the monotonic clock (as the C does).
+                        inner.entries[i].deadline =
+                            now_mono + inner.entries[i].period_ms as i64 * 10_000;
+                        inner.entries[i].clock = Clock::Mono;
+                        i += 1;
+                    } else {
+                        inner.entries.swap_remove(i);
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+
+            let mut sleep = TIMER_MAX_SLEEP_100NS;
+            for e in inner.entries.iter() {
+                let now = if e.clock == Clock::Mono { now_mono } else { now_sys };
+                let rem = (e.deadline - now).max(0);
+                if rem < sleep {
+                    sleep = rem;
+                }
+            }
+
+            let terminate = inner.objcount == 0 && inner.entries.is_empty();
+            if terminate {
+                inner.thread_running = false;
+            }
+            self.lock.unlock();
+
+            for obj in to_fire {
+                (self.on_expire)(obj);
+            }
+
+            if terminate {
+                return;
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                self.lock.lock();
+                unsafe { &mut *self.inner.get() }.thread_running = false;
+                self.lock.unlock();
+                return;
+            }
+
+            let seen = self.update.load(Ordering::Acquire);
+            self.os.futex_wait(&self.update, seen, sleep);
+        }
+    }
+
+    /// Signal shutdown, wake the service thread, and join it (teardown).
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.update.fetch_add(1, Ordering::AcqRel);
+        self.os.futex_wake_all(&self.update);
+        self.os.join_all();
+    }
 }
 
 #[cfg(test)]
@@ -570,6 +822,12 @@ mod tests {
                 h.join().unwrap();
             }
         }
+        fn now_mono_100ns(&self) -> i64 {
+            mono_now_100ns()
+        }
+        fn now_system_100ns(&self) -> i64 {
+            system_now_100ns()
+        }
     }
 
     /// Adversarial `PoolOs` modelling the *real* lock-free futex
@@ -609,6 +867,25 @@ mod tests {
                 h.join().unwrap();
             }
         }
+        fn now_mono_100ns(&self) -> i64 {
+            mono_now_100ns()
+        }
+        fn now_system_100ns(&self) -> i64 {
+            system_now_100ns()
+        }
+    }
+
+    /// Process-monotonic time in 100ns units (host stand-in for the perf counter).
+    fn mono_now_100ns() -> i64 {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        static START: OnceLock<Instant> = OnceLock::new();
+        (START.get_or_init(Instant::now).elapsed().as_nanos() / 100) as i64
+    }
+    /// Wall-clock time in 100ns units (host stand-in for system time).
+    fn system_now_100ns() -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() / 100) as i64
     }
 
     /// The dispatch seam (slice 1c plugs in tp_object_execute); here just count.
@@ -954,5 +1231,70 @@ mod tests {
             );
         }
         pool_ref.shutdown();
+    }
+
+    /// Timer callback: records its firing through `userdata`.
+    extern "system" fn record_timer_cb(
+        _inst: *mut CallbackInstance,
+        userdata: *mut c_void,
+        _timer: *mut c_void,
+    ) {
+        unsafe { (*(userdata as *const AtomicI32)).fetch_add(1, Ordering::Relaxed) };
+    }
+
+    /// Timer queue: a relative one-shot fires once after its deadline, an
+    /// immediate timer fires synchronously, a periodic timer keeps firing until
+    /// disarmed. `on_expire = dispatch_object`, so this also exercises the Timer
+    /// callback dispatch end to end.
+    #[test]
+    fn timer_relative_immediate_periodic() {
+        let fired: Vec<AtomicI32> = (0..3).map(|_| AtomicI32::new(0)).collect();
+        let mk = |i: usize| {
+            Box::new(ThreadpoolObject::new_timer(
+                record_timer_cb,
+                &fired[i] as *const AtomicI32 as *mut c_void,
+                1,
+            ))
+        };
+        let one_shot = mk(0);
+        let immediate = mk(1);
+        let periodic = mk(2);
+
+        let tq = Box::new(TimerQueue::new(TestOs::new(), dispatch_object as fn(*mut ThreadpoolObject)));
+        let tq: &TimerQueue<TestOs> = &tq;
+        for _ in 0..3 {
+            tq.obj_added();
+        }
+
+        // Relative one-shot ~20 ms; immediate; periodic every ~5 ms.
+        unsafe {
+            tq.set_timer(one_shot.as_ptr(), Some(-(20 * 10_000)), 0, 0);
+            tq.set_timer(immediate.as_ptr(), Some(0), 0, 0);
+            tq.set_timer(periodic.as_ptr(), Some(-(5 * 10_000)), 5, 0);
+        }
+
+        // Immediate fires synchronously in set_timer.
+        assert_eq!(fired[1].load(Ordering::Relaxed), 1, "immediate timer should fire at once");
+
+        // One-shot fires after its deadline, exactly once.
+        spin_until(|| fired[0].load(Ordering::Relaxed) >= 1, "relative one-shot");
+        thread::sleep(Duration::from_millis(40));
+        assert_eq!(fired[0].load(Ordering::Relaxed), 1, "one-shot fired more than once");
+
+        // Periodic has fired several times by now.
+        let p = fired[2].load(Ordering::Relaxed);
+        assert!(p >= 3, "periodic under-fired: {p}");
+
+        // Disarm the periodic; it stops (allow one in-flight fire).
+        unsafe { tq.set_timer(periodic.as_ptr(), None, 0, 0) };
+        let after = fired[2].load(Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(30));
+        let later = fired[2].load(Ordering::Relaxed);
+        assert!(later <= after + 1, "periodic kept firing after disarm: {after} -> {later}");
+
+        for _ in 0..3 {
+            tq.obj_removed();
+        }
+        tq.shutdown();
     }
 }
