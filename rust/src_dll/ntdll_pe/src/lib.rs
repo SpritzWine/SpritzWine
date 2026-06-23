@@ -16,6 +16,11 @@
 
 #![cfg_attr(not(test), no_std)]
 
+// The crate provides its own process-heap-backed global allocator (see `heap`),
+// so the `alloc` crate (Box/Vec/...) is available even in the freestanding PE
+// build -- the threadpool rewrite owns heap-allocated objects.
+extern crate alloc;
+
 /// Freestanding runtime glue, only needed for the real `no_std` build. Under
 /// `cargo test`, `std` provides the panic handler instead. The crate is fully
 /// allocation-free, so no global allocator is supplied -- a real-PE `ntdll.dll`
@@ -48,6 +53,7 @@ mod rt {
     }
 }
 
+pub mod heap;
 pub mod rtl_compress;
 pub mod status;
 pub mod unwind;

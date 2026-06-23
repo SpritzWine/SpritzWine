@@ -43,6 +43,8 @@ const UWOP_PUSH_MACHFRAME: u8 = 10;
 const UNW_FLAG_CHAININFO: u8 = 0x4;
 
 /// `~0u32`: sentinel the caller passes for `prolog_offset` when not in a prolog.
+/// (Used by the tests; the live path just compares the caller-supplied value.)
+#[cfg(test)]
 const NOT_IN_PROLOG: u32 = u32::MAX;
 
 /// Opcode entry size in 2-byte slots, mirroring Wine's `get_opcode_size`.
