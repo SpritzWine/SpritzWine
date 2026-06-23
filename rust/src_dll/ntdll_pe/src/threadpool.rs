@@ -27,7 +27,8 @@
 
 use crate::work_queue::{Node, TwoLockQueue};
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::ffi::c_void;
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 /// Number of `TP_CALLBACK_PRIORITY` levels (high, normal, low) -- matches the C
 /// `pool->pools[3]` ordering.
@@ -70,6 +71,12 @@ pub unsafe trait Scheduled {
 /// Priority-ordered object scheduler over three [`TwoLockQueue`]s.
 pub struct Scheduler {
     queues: [TwoLockQueue; PRIORITY_COUNT],
+    /// "Work in the system" = queued entries + in-flight callbacks. The
+    /// Rust-native replacement for the C `pool->num_busy_workers`: incremented on
+    /// every enqueue (as `tp_object_prio_queue` does) and decremented once per
+    /// completed callback ([`callback_done`](Self::callback_done)). Drives the
+    /// pool's worker-spawn decision.
+    busy: AtomicI32,
 }
 
 // Shared across the submit side and every worker.
@@ -84,7 +91,21 @@ impl Scheduler {
                 unsafe { TwoLockQueue::with_dummy(new_carrier()) },
                 unsafe { TwoLockQueue::with_dummy(new_carrier()) },
             ],
+            busy: AtomicI32::new(0),
         }
+    }
+
+    /// Current "busy" count (queued + in-flight callbacks).
+    #[inline]
+    pub fn busy(&self) -> i32 {
+        self.busy.load(Ordering::Acquire)
+    }
+
+    /// Account for one completed callback (the pool calls this after each
+    /// dispatch, mirroring the C `pool->num_busy_workers--`).
+    #[inline]
+    pub fn callback_done(&self) {
+        self.busy.fetch_sub(1, Ordering::AcqRel);
     }
 
     /// Append `obj` to its priority queue on a fresh carrier node.
@@ -94,6 +115,7 @@ impl Scheduler {
     unsafe fn enqueue<T: Scheduled>(&self, obj: *mut T) {
         let prio = unsafe { (*obj).sched_state().priority } as usize;
         debug_assert!(prio < PRIORITY_COUNT);
+        self.busy.fetch_add(1, Ordering::AcqRel);
         unsafe { self.queues[prio].enqueue(new_carrier(), obj.cast()) };
     }
 
@@ -173,13 +195,206 @@ fn free_carrier(n: *mut Node) {
     drop(unsafe { Box::from_raw(n) });
 }
 
+/// Default surplus-worker idle timeout before termination, in 100ns units
+/// (THREADPOOL_WORKER_TIMEOUT = 5000 ms in the C).
+pub const WORKER_TIMEOUT_100NS: i64 = 5000 * 10_000;
+
+/// OS primitives the pool needs, abstracted so the worker lifecycle is unit-
+/// testable on the host (std threads + a condvar-backed futex) while the real
+/// build uses ntdll's own `RtlCreateUserThread` / `RtlWaitOnAddress` (wired in
+/// slice 1c). The futex contract matches `RtlWaitOnAddress`: a waiter that reads
+/// the generation, then waits comparing against it, never misses a wake that
+/// bumped the generation first.
+pub trait PoolOs: Sync {
+    /// Spawn a worker thread that runs `entry(arg)`. Returns false on failure.
+    fn spawn(&self, entry: extern "system" fn(*mut c_void) -> u32, arg: *mut c_void) -> bool;
+    /// Block while `*addr == expected`, up to `timeout_100ns` (relative). Returns
+    /// true if woken, false if it timed out.
+    fn futex_wait(&self, addr: &AtomicU32, expected: u32, timeout_100ns: i64) -> bool;
+    /// Wake one / all waiters on `addr`.
+    fn futex_wake_one(&self, addr: &AtomicU32);
+    fn futex_wake_all(&self, addr: &AtomicU32);
+    /// Join all spawned workers (teardown; no-op in the real build, which exits
+    /// workers via the thread machinery).
+    fn join_all(&self) {}
+}
+
+/// The NT threadpool's worker-management half (stage 1b): atomic worker counts +
+/// futex wakeup over the lock-free [`Scheduler`]. The single fat `pool->cs` of
+/// the C is gone -- item hand-off and the pending/busy counts are lock-free, and
+/// only the (tiny, racy-tolerant) spawn/terminate policy reads the worker atomics.
+///
+/// Generic over [`PoolOs`] and the object type `T`; `run` is the per-callback
+/// dispatch seam that slice 1c fills with `tp_object_execute`.
+pub struct Pool<T: Scheduled, Os: PoolOs> {
+    scheduler: Scheduler,
+    num_workers: AtomicI32,
+    min_workers: AtomicI32,
+    max_workers: AtomicI32,
+    /// Objects bound to the pool; keeps the last worker alive while > 0 (C `objcount`).
+    objcount: AtomicI32,
+    shutdown: AtomicBool,
+    /// Futex generation; bumped before each submit-wake so a worker between
+    /// reading it and sleeping cannot miss the wake.
+    update: AtomicU32,
+    worker_timeout_100ns: i64,
+    run: fn(*mut T),
+    os: Os,
+}
+
+unsafe impl<T: Scheduled, Os: PoolOs> Sync for Pool<T, Os> {}
+unsafe impl<T: Scheduled, Os: PoolOs> Send for Pool<T, Os> {}
+
+/// Worker thread entry: OS-agnostic, instantiated per `<T, Os>`. Returning exits
+/// the thread (the real build's thread machinery calls `RtlExitUserThread` on
+/// return; std joins it).
+extern "system" fn worker_entry<T: Scheduled, Os: PoolOs>(arg: *mut c_void) -> u32 {
+    // SAFETY: `arg` is the `&Pool` passed to `spawn`, alive for the worker's life
+    // (refcount in the real build; the test joins before drop).
+    let pool = unsafe { &*(arg as *const Pool<T, Os>) };
+    pool.run_worker();
+    0
+}
+
+impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
+    pub fn new(os: Os, run: fn(*mut T)) -> Self {
+        Pool {
+            scheduler: Scheduler::new(),
+            num_workers: AtomicI32::new(0),
+            min_workers: AtomicI32::new(0),
+            max_workers: AtomicI32::new(500),
+            objcount: AtomicI32::new(0),
+            shutdown: AtomicBool::new(false),
+            update: AtomicU32::new(0),
+            worker_timeout_100ns: WORKER_TIMEOUT_100NS,
+            run,
+            os,
+        }
+    }
+
+    pub fn num_workers(&self) -> i32 {
+        self.num_workers.load(Ordering::Acquire)
+    }
+    pub fn set_min_workers(&self, n: i32) {
+        self.min_workers.store(n, Ordering::Release);
+    }
+    pub fn set_max_workers(&self, n: i32) {
+        self.max_workers.store(n, Ordering::Release);
+    }
+    pub fn set_worker_timeout(&mut self, t100ns: i64) {
+        self.worker_timeout_100ns = t100ns;
+    }
+    /// Bind / unbind an object to the pool (C `objcount++/--`, via tp_threadpool_lock/unlock).
+    pub fn obj_added(&self) {
+        self.objcount.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn obj_removed(&self) {
+        self.objcount.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Ensure at least one worker exists (the C `tp_threadpool_lock` guarantee).
+    pub fn ensure_started(&self) {
+        if self.num_workers.load(Ordering::Acquire) == 0 {
+            self.spawn_one();
+        }
+    }
+
+    /// Try to spawn one worker, reserving its count slot first so concurrent
+    /// callers don't over-spawn; gives the slot back on failure. Returns success.
+    fn spawn_one(&self) -> bool {
+        self.num_workers.fetch_add(1, Ordering::AcqRel);
+        if self.os.spawn(worker_entry::<T, Os>, self as *const _ as *mut c_void) {
+            true
+        } else {
+            self.num_workers.fetch_sub(1, Ordering::AcqRel);
+            false
+        }
+    }
+
+    /// Spawn a worker iff the policy wants one for a submit whose pre-submit busy
+    /// count was `busy_before` (C: `num_busy_workers >= num_workers && num_workers
+    /// < max_workers`). Returns true if a worker was spawned.
+    fn maybe_spawn(&self, busy_before: i32) -> bool {
+        let workers = self.num_workers.load(Ordering::Acquire);
+        let max = self.max_workers.load(Ordering::Acquire);
+        if busy_before >= workers && workers < max {
+            return self.spawn_one();
+        }
+        false
+    }
+
+    /// Submit one callback for `obj` (the worker-managed `tp_object_submit`):
+    /// enqueue (so any worker we spawn next will see it), then either spawn a new
+    /// worker or wake an idle one.
+    ///
+    /// # Safety
+    /// `obj` must satisfy [`Scheduled`] and outlive its pending callbacks.
+    pub unsafe fn submit(&self, obj: *mut T) {
+        let busy_before = self.scheduler.busy();
+        unsafe { self.scheduler.submit(obj) };
+        if !self.maybe_spawn(busy_before) {
+            // Bump the generation before waking so a worker that just read it
+            // (and is about to sleep) sees the change and does not miss this item.
+            self.update.fetch_add(1, Ordering::AcqRel);
+            self.os.futex_wake_one(&self.update);
+        }
+    }
+
+    /// A surplus worker may terminate on idle (C: `num_workers > max(min,1) ||
+    /// (!min && !objcount)`).
+    fn can_terminate(&self) -> bool {
+        let workers = self.num_workers.load(Ordering::Acquire);
+        let min = self.min_workers.load(Ordering::Acquire);
+        let objcount = self.objcount.load(Ordering::Acquire);
+        workers > min.max(1) || (min == 0 && objcount == 0)
+    }
+
+    /// The worker loop (the Rust `threadpool_worker_proc`): drain all ready
+    /// callbacks, then sleep on the futex until a submit wakes us or the idle
+    /// timeout lets a surplus worker exit.
+    fn run_worker(&self) {
+        loop {
+            while let Some(obj) = unsafe { self.scheduler.worker_take::<T>() } {
+                (self.run)(obj);
+                self.scheduler.callback_done();
+                // (slice 1c: release the object's refcount here.)
+            }
+
+            if self.shutdown.load(Ordering::Acquire) {
+                break;
+            }
+
+            // Read the generation, then sleep comparing against it. A submit that
+            // raced our drain bumped the generation, so the wait returns at once.
+            let seen = self.update.load(Ordering::Acquire);
+            let woken = self.os.futex_wait(&self.update, seen, self.worker_timeout_100ns);
+            if !woken && self.can_terminate() {
+                // Genuine idle timeout (no submit since `gen`) and we are surplus:
+                // the queue we just drained is still empty, so exiting loses no work.
+                break;
+            }
+        }
+        self.num_workers.fetch_sub(1, Ordering::AcqRel);
+        // (slice 1c: tp_threadpool_release here.)
+    }
+
+    /// Signal shutdown, wake every worker, and join them (teardown).
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.update.fetch_add(1, Ordering::AcqRel);
+        self.os.futex_wake_all(&self.update);
+        self.os.join_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     extern crate std;
-    use core::sync::atomic::AtomicBool;
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
     use std::vec::Vec;
 
     struct TestObj {
@@ -194,6 +409,71 @@ mod tests {
     unsafe impl Scheduled for TestObj {
         fn sched_state(&self) -> &SchedState {
             &self.sched
+        }
+    }
+
+    /// Host `PoolOs`: real std worker threads + a condvar-emulated futex. The
+    /// generation is checked under the same lock the wake holds, so the
+    /// `RtlWaitOnAddress` no-lost-wakeup contract holds.
+    struct TestOs {
+        handles: Mutex<Vec<JoinHandle<()>>>,
+        lock: Mutex<()>,
+        cv: Condvar,
+    }
+    impl TestOs {
+        fn new() -> Self {
+            TestOs { handles: Mutex::new(Vec::new()), lock: Mutex::new(()), cv: Condvar::new() }
+        }
+    }
+    impl PoolOs for TestOs {
+        fn spawn(&self, entry: extern "system" fn(*mut c_void) -> u32, arg: *mut c_void) -> bool {
+            let arg = arg as usize; // raw ptr isn't Send; the pool outlives the threads
+            let h = thread::spawn(move || {
+                entry(arg as *mut c_void);
+            });
+            self.handles.lock().unwrap().push(h);
+            true
+        }
+        fn futex_wait(&self, addr: &AtomicU32, expected: u32, timeout_100ns: i64) -> bool {
+            let guard = self.lock.lock().unwrap();
+            if addr.load(Ordering::Acquire) != expected {
+                return true; // already changed -> treat as woken
+            }
+            let dur = Duration::from_nanos(timeout_100ns.max(0) as u64 * 100);
+            let (_g, res) = self.cv.wait_timeout(guard, dur).unwrap();
+            !res.timed_out()
+        }
+        fn futex_wake_one(&self, _addr: &AtomicU32) {
+            let _g = self.lock.lock().unwrap();
+            self.cv.notify_one();
+        }
+        fn futex_wake_all(&self, _addr: &AtomicU32) {
+            let _g = self.lock.lock().unwrap();
+            self.cv.notify_all();
+        }
+        fn join_all(&self) {
+            let mut hs = self.handles.lock().unwrap();
+            for h in hs.drain(..) {
+                h.join().unwrap();
+            }
+        }
+    }
+
+    /// The dispatch seam (slice 1c plugs in tp_object_execute); here just count.
+    fn run_test_obj(o: *mut TestObj) {
+        unsafe { (*o).ran.fetch_add(1, Ordering::Relaxed) };
+    }
+
+    fn total_ran(objs: &[Box<TestObj>]) -> i32 {
+        objs.iter().map(|o| o.ran.load(Ordering::Relaxed)).sum()
+    }
+
+    fn spin_until(mut cond: impl FnMut() -> bool, what: &str) {
+        let mut spins: u64 = 0;
+        while !cond() {
+            spins += 1;
+            assert!(spins < 2_000_000_000, "timed out waiting for {what}");
+            core::hint::spin_loop();
         }
     }
 
@@ -325,5 +605,82 @@ mod tests {
             );
             assert_eq!(o.sched.pending(), 0, "object {i} pending not drained");
         }
+    }
+
+    /// Full worker lifecycle over the real Pool: concurrent producers drive
+    /// spawn-on-demand, every callback runs exactly once, idle workers
+    /// self-terminate on the (shortened) timeout, and a later batch re-spawns
+    /// workers and still drains. Exercises the lock-free hand-off + atomic worker
+    /// management together with no lost work and no hang.
+    #[test]
+    fn worker_lifecycle_spawn_drain_terminate_respawn() {
+        const PRODUCERS: usize = 4;
+        const PER_PRODUCER: usize = 10_000;
+        const OBJECTS: usize = 16;
+
+        let objs: Vec<Box<TestObj>> = (0..OBJECTS).map(|i| TestObj::new((i % 3) as u8)).collect();
+        let submitted: Vec<AtomicI32> = (0..OBJECTS).map(|_| AtomicI32::new(0)).collect();
+
+        let mut pool = Box::new(Pool::new(TestOs::new(), run_test_obj as fn(*mut TestObj)));
+        pool.set_min_workers(0);
+        pool.set_worker_timeout(200_000); // 20 ms, so idle termination is testable
+        let pool: Box<Pool<TestObj, TestOs>> = pool; // freeze: no more &mut while shared
+        let pool_ref: &Pool<TestObj, TestOs> = &pool;
+
+        let obj_ptr = |i: usize| Box::as_ref(&objs[i]) as *const TestObj as *mut TestObj;
+
+        // Phase 1: keep workers alive (one bound object set) and hammer from many
+        // producers; the pool spawns workers on demand.
+        pool_ref.obj_added();
+        pool_ref.ensure_started();
+        thread::scope(|s| {
+            for p in 0..PRODUCERS {
+                let submitted = &submitted;
+                let objs_ref = &objs;
+                s.spawn(move || {
+                    let _ = &objs_ref;
+                    for i in 0..PER_PRODUCER {
+                        let idx = (p * 7 + i * 13) % OBJECTS;
+                        submitted[idx].fetch_add(1, Ordering::Relaxed);
+                        let ptr = Box::as_ref(&objs_ref[idx]) as *const TestObj as *mut TestObj;
+                        unsafe { pool_ref.submit(ptr) };
+                    }
+                });
+            }
+        });
+        let phase1: i32 = submitted.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+        spin_until(|| total_ran(&objs) == phase1, "phase 1 drain");
+        for i in 0..OBJECTS {
+            assert_eq!(
+                objs[i].ran.load(Ordering::Relaxed),
+                submitted[i].load(Ordering::Relaxed),
+                "object {i} ran != submitted (phase 1)"
+            );
+            assert_eq!(objs[i].sched.pending(), 0, "object {i} pending (phase 1)");
+        }
+        assert!(pool_ref.num_workers() >= 1, "expected live workers in phase 1");
+
+        // Phase 2: unbind the object set; idle workers must self-terminate.
+        pool_ref.obj_removed();
+        spin_until(|| pool_ref.num_workers() == 0, "idle worker termination");
+
+        // Phase 3: submit again -> the pool must re-spawn a worker and drain.
+        pool_ref.obj_added();
+        let before = total_ran(&objs);
+        for i in 0..OBJECTS {
+            unsafe { pool_ref.submit(obj_ptr(i)) };
+        }
+        spin_until(|| total_ran(&objs) == before + OBJECTS as i32, "phase 3 drain");
+        for i in 0..OBJECTS {
+            assert_eq!(
+                objs[i].ran.load(Ordering::Relaxed),
+                submitted[i].load(Ordering::Relaxed) + 1,
+                "object {i} ran != submitted (phase 3)"
+            );
+        }
+
+        // Teardown: join every worker thread before the pool/objects drop.
+        pool_ref.shutdown();
+        assert_eq!(pool_ref.num_workers(), 0, "workers left after shutdown");
     }
 }
