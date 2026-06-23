@@ -431,20 +431,32 @@ pub type SimpleCallback = extern "system" fn(*mut CallbackInstance, *mut c_void)
 pub type TimerCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void);
 /// `CALLBACK`-ABI wait callback: `void(PTP_CALLBACK_INSTANCE, PVOID, PTP_WAIT, TP_WAIT_RESULT)`.
 pub type WaitCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void, u32);
+/// `CALLBACK`-ABI I/O callback:
+/// `void(PTP_CALLBACK_INSTANCE, PVOID, PVOID overlapped, PIO_STATUS_BLOCK, PTP_IO)`.
+pub type IoCallback =
+    extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void, *mut IoStatusBlock, *mut c_void);
 
 /// `TP_WAIT_RESULT` values handed to a wait callback.
 pub const WAIT_OBJECT_0: u32 = 0;
 pub const WAIT_TIMEOUT: u32 = 0x0000_0102;
 
+/// `IO_STATUS_BLOCK` passed (by pointer) to an I/O callback.
+#[repr(C)]
+pub struct IoStatusBlock {
+    pub status: i32,
+    pub information: usize,
+}
+
 /// The callback and its type, stored per object (the C `union u` + `type` tag).
 /// Timer scheduling state lives in the [`TimerQueue`]; wait scheduling state in
 /// the [`WaitQueue`](crate::wait_queue::WaitQueue) (only the signaled count, used
-/// at dispatch, is on the object).
+/// at dispatch, is on the object); I/O completion state in the object's `io`.
 pub enum Callback {
     Simple(SimpleCallback),
     Work(WorkCallback),
     Timer(TimerCallback),
     Wait(WaitCallback),
+    Io(IoCallback),
 }
 
 /// Per-callback `TP_CALLBACK_INSTANCE`. Minimal for now -- enough to pass to the
@@ -470,6 +482,9 @@ pub struct ThreadpoolObject {
     /// [`WaitQueue`](crate::wait_queue::WaitQueue) and consumed at dispatch to
     /// pick `WAIT_OBJECT_0` vs `WAIT_TIMEOUT` (C `object->u.wait.signaled`).
     pub(crate) signaled: AtomicI32,
+    /// I/O objects only: the pending/completion state (C `object->u.io`). `None`
+    /// for every other object type, so non-I/O objects pay one word.
+    pub(crate) io: Option<Box<crate::io_queue::IoState>>,
 }
 
 unsafe impl Scheduled for ThreadpoolObject {
@@ -492,6 +507,7 @@ impl ThreadpoolObject {
             may_run_long: false,
             refcount: AtomicI32::new(0),
             signaled: AtomicI32::new(0),
+            io: None,
         }
     }
     pub fn new_work(callback: WorkCallback, userdata: *mut c_void, priority: u8) -> Self {
@@ -505,6 +521,19 @@ impl ThreadpoolObject {
     }
     pub fn new_wait(callback: WaitCallback, userdata: *mut c_void, priority: u8) -> Self {
         Self::with_callback(Callback::Wait(callback), userdata, priority)
+    }
+    pub fn new_io(callback: IoCallback, userdata: *mut c_void, priority: u8) -> Self {
+        let mut o = Self::with_callback(Callback::Io(callback), userdata, priority);
+        o.io = Some(Box::new(crate::io_queue::IoState::new()));
+        o
+    }
+
+    /// I/O completion state, for the [`IoQueue`](crate::io_queue::IoQueue).
+    ///
+    /// # Panics
+    /// Only valid on objects created via [`new_io`](Self::new_io).
+    pub(crate) fn io_state(&self) -> &crate::io_queue::IoState {
+        self.io.as_ref().expect("io_state on a non-I/O object")
     }
 
     /// Raw object pointer for use as a TP_* handle / scheduler key.
@@ -538,6 +567,14 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
                 WAIT_TIMEOUT
             };
             cb(inst, o.userdata, obj.cast(), result);
+        }
+        Callback::Io(cb) => {
+            // Pop the completion this callback was submitted for (C pops
+            // u.io.completions[--completion_count]).
+            if let Some((status, information, cvalue)) = o.io_state().pop_completion() {
+                let mut iosb = IoStatusBlock { status, information };
+                cb(inst, o.userdata, cvalue as *mut c_void, &mut iosb as *mut IoStatusBlock, obj.cast());
+            }
         }
     }
     // (1c later: finalization callback, instance cleanup tasks, simple-object
