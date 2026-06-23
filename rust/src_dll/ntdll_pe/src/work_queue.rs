@@ -129,6 +129,17 @@ impl TwoLockQueue {
         Some((value, head))
     }
 
+    /// Best-effort emptiness peek (non-destructive). A freshly enqueued node is
+    /// published via `prev->next` with `Release`, so an `Acquire` load of
+    /// `head->next` observes it; racing with a concurrent dequeue advancing
+    /// `head` only affects liveness, not the "is there work?" answer this is used
+    /// for (the worker's terminate guard).
+    pub fn is_empty(&self) -> bool {
+        let head = self.head.load(Ordering::Acquire);
+        // SAFETY: head is always a live node (the current dummy).
+        unsafe { (*head).next.load(Ordering::Acquire).is_null() }
+    }
+
     /// Pop every remaining payload, invoking `f(value)` for each, and return the
     /// final dummy node so the caller can reclaim it. Single-threaded teardown
     /// helper (no concurrent ops allowed).

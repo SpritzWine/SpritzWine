@@ -108,6 +108,13 @@ impl Scheduler {
         self.busy.fetch_sub(1, Ordering::AcqRel);
     }
 
+    /// Best-effort: are all priority queues empty? Used by a worker's terminate
+    /// guard (the Rust `!threadpool_get_next_item`); see [`TwoLockQueue::is_empty`].
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.queues.iter().all(TwoLockQueue::is_empty)
+    }
+
     /// Append `obj` to its priority queue on a fresh carrier node.
     ///
     /// # Safety
@@ -361,21 +368,34 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
             }
 
             if self.shutdown.load(Ordering::Acquire) {
-                break;
+                self.num_workers.fetch_sub(1, Ordering::AcqRel);
+                return;
             }
 
             // Read the generation, then sleep comparing against it. A submit that
             // raced our drain bumped the generation, so the wait returns at once.
             let seen = self.update.load(Ordering::Acquire);
             let woken = self.os.futex_wait(&self.update, seen, self.worker_timeout_100ns);
-            if !woken && self.can_terminate() {
-                // Genuine idle timeout (no submit since `gen`) and we are surplus:
-                // the queue we just drained is still empty, so exiting loses no work.
-                break;
+            if woken || !self.can_terminate() {
+                continue; // more work may have arrived, or we must stay alive
             }
+
+            // Idle timeout on a surplus worker. We must NOT trust `!woken` to mean
+            // "no work": the lock-free futex (RtlWaitOnAddress) can return TIMEOUT
+            // while a submit's wake is lost to that very timeout, leaving an item
+            // queued. So re-check the queue before terminating -- the Rust
+            // equivalent of the C worker proc's `!threadpool_get_next_item`.
+            //
+            // Decrement num_workers *first* so a submit that races this check sees
+            // the lower count and spawns a replacement; then verify the queue. If
+            // an item slipped in, rejoin (re-increment) and drain it.
+            self.num_workers.fetch_sub(1, Ordering::AcqRel);
+            if self.scheduler.is_empty() {
+                return;
+            }
+            self.num_workers.fetch_add(1, Ordering::AcqRel);
+            // (slice 1c: tp_threadpool_release on the real exit paths above.)
         }
-        self.num_workers.fetch_sub(1, Ordering::AcqRel);
-        // (slice 1c: tp_threadpool_release here.)
     }
 
     /// Signal shutdown, wake every worker, and join them (teardown).
@@ -547,6 +567,45 @@ mod tests {
         fn join_all(&self) {
             let mut hs = self.handles.lock().unwrap();
             for h in hs.drain(..) {
+                h.join().unwrap();
+            }
+        }
+    }
+
+    /// Adversarial `PoolOs` modelling the *real* lock-free futex
+    /// (`RtlWaitOnAddress`): every wake is lost and every wait "times out". A
+    /// correct `run_worker` must still drain all work via its terminate re-check
+    /// (+ spawn-on-submit), never stranding an item -- which `TestOs`'s condvar
+    /// cannot stress, since it never loses a wakeup.
+    struct LossyOs {
+        handles: Mutex<Vec<JoinHandle<()>>>,
+    }
+    impl LossyOs {
+        fn new() -> Self {
+            LossyOs { handles: Mutex::new(Vec::new()) }
+        }
+    }
+    impl PoolOs for LossyOs {
+        fn spawn(&self, entry: extern "system" fn(*mut c_void) -> u32, arg: *mut c_void) -> bool {
+            let arg = arg as usize;
+            let h = thread::spawn(move || {
+                entry(arg as *mut c_void);
+            });
+            self.handles.lock().unwrap().push(h);
+            true
+        }
+        fn futex_wait(&self, _addr: &AtomicU32, _expected: u32, _t: i64) -> bool {
+            // Always "time out", never report a wake -> maximally lossy. The nap
+            // makes a worker linger (so maybe_spawn defers to it rather than
+            // spawning a replacement) -- the window where a missing terminate
+            // re-check actually strands work.
+            thread::sleep(Duration::from_millis(2));
+            false
+        }
+        fn futex_wake_one(&self, _addr: &AtomicU32) {} // wake lost
+        fn futex_wake_all(&self, _addr: &AtomicU32) {} // wake lost
+        fn join_all(&self) {
+            for h in self.handles.lock().unwrap().drain(..) {
                 h.join().unwrap();
             }
         }
@@ -777,6 +836,57 @@ mod tests {
         // Teardown: join every worker thread before the pool/objects drop.
         pool_ref.shutdown();
         assert_eq!(pool_ref.num_workers(), 0, "workers left after shutdown");
+    }
+
+    /// Under the maximally-lossy futex ([`LossyOs`], every wake lost), with
+    /// `min_workers = 0` so every idle worker aggressively tries to terminate,
+    /// concurrent producers must still see every callback run -- i.e. the
+    /// `run_worker` terminate re-check (+ resurrect) strands no work. Without that
+    /// re-check, the tail items submitted as workers exit are lost and this hangs.
+    #[test]
+    fn terminate_submit_race_loses_no_work() {
+        const PRODUCERS: usize = 2;
+        const PER_PRODUCER: usize = 80;
+        const OBJECTS: usize = 8;
+
+        let objs: Vec<Box<TestObj>> = (0..OBJECTS).map(|i| TestObj::new((i % 3) as u8)).collect();
+        let submitted: Vec<AtomicI32> = (0..OBJECTS).map(|_| AtomicI32::new(0)).collect();
+
+        let pool = Box::new(Pool::new(LossyOs::new(), run_test_obj as fn(*mut TestObj)));
+        pool.set_min_workers(0); // aggressive termination -> maximal terminate/submit racing
+        let pool: Box<Pool<TestObj, LossyOs>> = pool;
+        let pool_ref: &Pool<TestObj, LossyOs> = &pool;
+        pool_ref.ensure_started();
+
+        thread::scope(|s| {
+            for p in 0..PRODUCERS {
+                let submitted = &submitted;
+                let objs_ref = &objs;
+                s.spawn(move || {
+                    for i in 0..PER_PRODUCER {
+                        let idx = (p * 3 + i * 7) % OBJECTS;
+                        submitted[idx].fetch_add(1, Ordering::Relaxed);
+                        let ptr = Box::as_ref(&objs_ref[idx]) as *const TestObj as *mut TestObj;
+                        unsafe { pool_ref.submit(ptr) };
+                        // Gap < the lossy wait, so each item tends to land while a
+                        // worker is asleep (maybe_spawn defers to it) -- the window
+                        // where a missing terminate re-check strands the item.
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                });
+            }
+        });
+
+        let total: i32 = submitted.iter().map(|a| a.load(Ordering::Relaxed)).sum();
+        spin_until(|| total_ran(&objs) == total, "lossy-futex drain (no stranded work)");
+        for i in 0..OBJECTS {
+            assert_eq!(
+                objs[i].ran.load(Ordering::Relaxed),
+                submitted[i].load(Ordering::Relaxed),
+                "object {i} ran != submitted under lossy futex"
+            );
+        }
+        pool_ref.shutdown();
     }
 
     /// Real work callback: records its run through `userdata` and checks it got a
