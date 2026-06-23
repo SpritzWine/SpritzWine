@@ -56,6 +56,7 @@ mod rt {
 pub mod heap;
 pub mod rtl_compress;
 pub mod status;
+pub mod threadpool;
 pub mod unwind;
 pub mod work_queue;
 
