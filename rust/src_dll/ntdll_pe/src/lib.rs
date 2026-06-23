@@ -50,6 +50,7 @@ mod rt {
 
 pub mod rtl_compress;
 pub mod status;
+pub mod unwind;
 
 /// Linker anchor for the PE-side static-archive link.
 ///
