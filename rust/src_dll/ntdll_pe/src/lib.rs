@@ -61,6 +61,10 @@ pub mod status;
 pub mod threadpool;
 pub mod unwind;
 pub mod wait_queue;
+// The real ntdll FFI backend; only the no_std build links against ntdll. Host
+// tests use mocks, so it is excluded there.
+#[cfg(not(test))]
+pub mod wine_os;
 pub mod work_queue;
 
 /// Linker anchor for the PE-side static-archive link.
