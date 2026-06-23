@@ -68,6 +68,11 @@ impl SchedState {
 /// refcount, exactly as in the C).
 pub unsafe trait Scheduled {
     fn sched_state(&self) -> &SchedState;
+    /// Called by [`Pool::submit`] for each submitted callback (the C
+    /// `InterlockedIncrement(&object->refcount)` in tp_object_submit). Default
+    /// no-op (test objects without a refcount); [`ThreadpoolObject`] bumps its
+    /// refcount so the allocation outlives the in-flight callback.
+    fn on_submit(&self) {}
 }
 
 /// Priority-ordered object scheduler over three [`TwoLockQueue`]s.
@@ -344,6 +349,7 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
     /// `obj` must satisfy [`Scheduled`] and outlive its pending callbacks.
     pub unsafe fn submit(&self, obj: *mut T) {
         let busy_before = self.scheduler.busy();
+        unsafe { (*obj).on_submit() }; // refcount++ before enqueue (C tp_object_submit)
         unsafe { self.scheduler.submit(obj) };
         if !self.maybe_spawn(busy_before) {
             // Bump the generation before waking so a worker that just read it
@@ -473,11 +479,23 @@ pub struct ThreadpoolObject {
     callback: Callback,
     userdata: *mut c_void,
     may_run_long: bool,
-    /// Object lifetime refcount (C `object->refcount`): +1 per pending callback,
-    /// -1 after each runs; the allocation is freed at 0. Read once the release
-    /// path is wired (refcount sub-slice of 1c).
-    #[allow(dead_code)]
+    /// Object lifetime refcount (C `object->refcount`): starts at 1 (the base
+    /// reference released by TpRelease*/cleanup-group), +1 per submitted callback,
+    /// -1 after each runs; the allocation is freed at 0 ([`tp_object_release`]).
     refcount: AtomicI32,
+    /// Callbacks currently executing (C `num_running_callbacks`); with
+    /// [`SchedState::pending`] drives "finished" for [`tp_object_wait`].
+    num_running: AtomicI32,
+    /// Set by [`tp_object_cancel`]; a worker skips a cancelled object's callback
+    /// (still draining the pending count + releasing its reference).
+    cancelled: AtomicBool,
+    /// Cleanup-group membership (C `object->group` / `is_group_member`); set at
+    /// init via [`Group::add_member`](crate::cleanup_group::Group::add_member).
+    pub(crate) group: *const crate::cleanup_group::Group,
+    pub(crate) is_group_member: AtomicBool,
+    /// Group cancel callback (C `group_cancel_callback`), run by
+    /// TpReleaseCleanupGroupMembers on a cancel.
+    pub(crate) group_cancel_callback: Option<extern "system" fn(*mut c_void, *mut c_void)>,
     /// Wait objects: count of signaled (vs timed-out) callbacks owed, set by the
     /// [`WaitQueue`](crate::wait_queue::WaitQueue) and consumed at dispatch to
     /// pick `WAIT_OBJECT_0` vs `WAIT_TIMEOUT` (C `object->u.wait.signaled`).
@@ -490,6 +508,9 @@ pub struct ThreadpoolObject {
 unsafe impl Scheduled for ThreadpoolObject {
     fn sched_state(&self) -> &SchedState {
         &self.sched
+    }
+    fn on_submit(&self) {
+        self.refcount.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -505,10 +526,29 @@ impl ThreadpoolObject {
             callback,
             userdata,
             may_run_long: false,
-            refcount: AtomicI32::new(0),
+            refcount: AtomicI32::new(1), // base reference
+            num_running: AtomicI32::new(0),
+            cancelled: AtomicBool::new(false),
+            group: core::ptr::null(),
+            is_group_member: AtomicBool::new(false),
+            group_cancel_callback: None,
             signaled: AtomicI32::new(0),
             io: None,
         }
+    }
+
+    pub fn userdata(&self) -> *mut c_void {
+        self.userdata
+    }
+    /// Add a reference (C `InterlockedIncrement(&object->refcount)`).
+    pub(crate) fn add_ref(&self) {
+        self.refcount.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn set_group_cancel_callback(
+        &mut self,
+        cb: Option<extern "system" fn(*mut c_void, *mut c_void)>,
+    ) {
+        self.group_cancel_callback = cb;
     }
     pub fn new_work(callback: WorkCallback, userdata: *mut c_void, priority: u8) -> Self {
         Self::with_callback(Callback::Work(callback), userdata, priority)
@@ -548,37 +588,83 @@ impl ThreadpoolObject {
 /// # Safety
 /// `obj` must point to a live [`ThreadpoolObject`] for the callback's duration.
 pub fn dispatch_object(obj: *mut ThreadpoolObject) {
-    // SAFETY: live for the callback per the scheduler's contract.
+    // SAFETY: live for the callback per the scheduler's contract (refcount).
     let o = unsafe { &*obj };
-    let mut instance = CallbackInstance { object: obj, may_run_long: o.may_run_long };
-    let inst = &mut instance as *mut CallbackInstance;
-    match o.callback {
-        Callback::Simple(cb) => cb(inst, o.userdata),
-        Callback::Work(cb) => cb(inst, o.userdata, obj.cast()),
-        Callback::Timer(cb) => cb(inst, o.userdata, obj.cast()),
-        Callback::Wait(cb) => {
-            // One callback per submit; if signaled callbacks remain, consume one
-            // (WAIT_OBJECT_0), else this is a timeout (C tp_object_execute).
-            let prev = o.signaled.fetch_sub(1, Ordering::AcqRel);
-            let result = if prev > 0 {
-                WAIT_OBJECT_0
-            } else {
-                o.signaled.fetch_add(1, Ordering::AcqRel); // restore; was a timeout
-                WAIT_TIMEOUT
-            };
-            cb(inst, o.userdata, obj.cast(), result);
-        }
-        Callback::Io(cb) => {
-            // Pop the completion this callback was submitted for (C pops
-            // u.io.completions[--completion_count]).
-            if let Some((status, information, cvalue)) = o.io_state().pop_completion() {
-                let mut iosb = IoStatusBlock { status, information };
-                cb(inst, o.userdata, cvalue as *mut c_void, &mut iosb as *mut IoStatusBlock, obj.cast());
+    o.num_running.fetch_add(1, Ordering::AcqRel);
+
+    // A cancelled object still drains its pending count + reference, but its
+    // callback is not run (C tp_object_cancel removed it from the queue).
+    if !o.cancelled.load(Ordering::Acquire) {
+        let mut instance = CallbackInstance { object: obj, may_run_long: o.may_run_long };
+        let inst = &mut instance as *mut CallbackInstance;
+        match o.callback {
+            Callback::Simple(cb) => cb(inst, o.userdata),
+            Callback::Work(cb) => cb(inst, o.userdata, obj.cast()),
+            Callback::Timer(cb) => cb(inst, o.userdata, obj.cast()),
+            Callback::Wait(cb) => {
+                // One callback per submit; if signaled callbacks remain, consume
+                // one (WAIT_OBJECT_0), else this is a timeout (C tp_object_execute).
+                let prev = o.signaled.fetch_sub(1, Ordering::AcqRel);
+                let result = if prev > 0 {
+                    WAIT_OBJECT_0
+                } else {
+                    o.signaled.fetch_add(1, Ordering::AcqRel); // restore; was a timeout
+                    WAIT_TIMEOUT
+                };
+                cb(inst, o.userdata, obj.cast(), result);
+            }
+            Callback::Io(cb) => {
+                // Pop the completion this callback was submitted for (C pops
+                // u.io.completions[--completion_count]).
+                if let Some((status, information, cvalue)) = o.io_state().pop_completion() {
+                    let mut iosb = IoStatusBlock { status, information };
+                    cb(inst, o.userdata, cvalue as *mut c_void, &mut iosb as *mut IoStatusBlock, obj.cast());
+                }
             }
         }
     }
-    // (1c later: finalization callback, instance cleanup tasks, simple-object
-    // auto-shutdown, and the refcount release.)
+
+    o.num_running.fetch_sub(1, Ordering::AcqRel);
+    // (later: finalization callback + instance cleanup tasks.)
+    tp_object_release(obj);
+}
+
+/// True once no callbacks are queued or running for `obj` (C `object_is_finished`).
+fn object_is_finished(obj: *const ThreadpoolObject) -> bool {
+    let o = unsafe { &*obj };
+    o.sched.pending() <= 0 && o.num_running.load(Ordering::Acquire) <= 0
+}
+
+/// Drop one reference; free the object (and unlink it from its cleanup group) when
+/// the last goes (the C `tp_object_release`).
+///
+/// # Safety
+/// `obj` must be a live, heap-allocated [`ThreadpoolObject`] (from `Box::into_raw`).
+pub fn tp_object_release(obj: *mut ThreadpoolObject) {
+    let o = unsafe { &*obj };
+    if o.refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
+        crate::cleanup_group::unlink_member(obj);
+        drop(unsafe { Box::from_raw(obj) });
+    }
+}
+
+/// Cancel an object: its still-pending callbacks are skipped by the workers as
+/// they drain (the C removes the object from the queue immediately; here a worker
+/// dequeues and skips). Needs the pool's workers to be draining (true during
+/// cleanup, since the submits that queued the work spawned them).
+pub fn tp_object_cancel(obj: *mut ThreadpoolObject) {
+    unsafe { &*obj }.cancelled.store(true, Ordering::Release);
+}
+
+/// Wait until every queued/running callback of `obj` has finished (the C
+/// `tp_object_wait`). Spin-wait for now; a futex/condvar is the refinement.
+///
+/// # Safety
+/// The caller must hold a reference so `obj` stays alive across the wait.
+pub fn tp_object_wait(obj: *mut ThreadpoolObject) {
+    while !object_is_finished(obj) {
+        core::hint::spin_loop();
+    }
 }
 
 // ===========================================================================
@@ -950,6 +1036,13 @@ mod tests {
         unsafe { (*o).ran.fetch_add(1, Ordering::Relaxed) };
     }
 
+    /// Timer/service on_expire that, like a real submit, bumps the refcount before
+    /// dispatch (whose release then balances it), so the test keeps owning the object.
+    fn timer_on_expire(obj: *mut ThreadpoolObject) {
+        unsafe { (*obj).add_ref() };
+        dispatch_object(obj);
+    }
+
     fn total_ran(objs: &[Box<TestObj>]) -> i32 {
         objs.iter().map(|o| o.ran.load(Ordering::Relaxed)).sum()
     }
@@ -1317,7 +1410,7 @@ mod tests {
         let immediate = mk(1);
         let periodic = mk(2);
 
-        let tq = Box::new(TimerQueue::new(TestOs::new(), dispatch_object as fn(*mut ThreadpoolObject)));
+        let tq = Box::new(TimerQueue::new(TestOs::new(), timer_on_expire as fn(*mut ThreadpoolObject)));
         let tq: &TimerQueue<TestOs> = &tq;
         for _ in 0..3 {
             tq.obj_added();

@@ -53,6 +53,7 @@ mod rt {
     }
 }
 
+pub mod cleanup_group;
 pub mod heap;
 pub mod io_queue;
 pub mod rtl_compress;

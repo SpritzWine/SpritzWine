@@ -319,6 +319,14 @@ mod tests {
         r.fired.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Model the pool's submit (refcount++) + the worker's dispatch (which
+    /// releases), so the object's refcount stays balanced and the test keeps
+    /// owning it.
+    fn io_on_submit(obj: *mut ThreadpoolObject) {
+        unsafe { (*obj).add_ref() };
+        dispatch_object(obj);
+    }
+
     fn spin_until(mut cond: impl FnMut() -> bool, what: &str) {
         let mut n: u64 = 0;
         while !cond() {
@@ -346,7 +354,7 @@ mod tests {
         ));
 
         let os = MockIoOs { port: port.clone(), handles: Mutex::new(Vec::new()) };
-        let q: Box<IoQueue<MockIoOs>> = Box::new(IoQueue::new(os, dispatch_object as fn(*mut ThreadpoolObject)));
+        let q: Box<IoQueue<MockIoOs>> = Box::new(IoQueue::new(os, io_on_submit as fn(*mut ThreadpoolObject)));
         let q: &IoQueue<MockIoOs> = &q;
 
         unsafe { q.obj_added(io.as_ptr(), 0x1234 /* dummy file */) };

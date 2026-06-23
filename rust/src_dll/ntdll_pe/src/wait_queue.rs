@@ -434,6 +434,8 @@ mod tests {
         if signaled {
             unsafe { (*obj).signaled.fetch_add(1, Ordering::AcqRel) };
         }
+        // Model the pool submit (refcount++) so dispatch's release stays balanced.
+        unsafe { (*obj).add_ref() };
         dispatch_object(obj);
     }
 
