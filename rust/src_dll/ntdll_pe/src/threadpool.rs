@@ -784,12 +784,12 @@ impl ThreadpoolObject {
 pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     // SAFETY: live for the callback per the scheduler's contract (refcount).
     let o = unsafe { &*obj };
-    // num_running / num_associated were already bumped at submit (on_submit) so a
-    // concurrent wait can't see a gap; here we only run the callback and drop them.
-    // A cancelled submission is skipped entirely: tp_object_cancel already did the
-    // running/associated/ref bookkeeping (so a concurrent wait isn't blocked on a
-    // callback that will never run); just let the carrier drain here. Only callbacks
-    // queued at cancel time are skipped; later submissions run normally.
+    // num_running / num_associated were bumped at submit (on_submit) so a concurrent
+    // wait can't see a gap. Claim a skip if this submission was cancelled: the cancel
+    // only *marks* cancel_pending (via a CAS here, race-free with the cancel and with
+    // other workers), and EVERY dispatch -- run or skip -- drops its own counts + ref
+    // exactly once in the tail below. (The old path had the cancel drop the counts
+    // itself, which double-counted against a worker that ran the callback anyway.)
     let skip = {
         let mut p = o.cancel_pending.load(Ordering::Acquire);
         loop {
@@ -807,11 +807,8 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
             }
         }
     };
-    if skip {
-        return;
-    }
     let mut instance = CallbackInstance::new(obj, o.may_run_long);
-    {
+    if !skip {
         let inst = &mut instance as *mut CallbackInstance;
         match o.callback {
             Callback::Simple(cb) => cb(inst, o.userdata),
@@ -849,14 +846,16 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
         if o.is_simple() {
             o.set_shutdown();
         }
+
+        // Run TpCallback*OnCompletion cleanup actions (the FFI lives in `exports`;
+        // host tests have no instance cleanup). C order: cs, mutex, semaphore, event,
+        // library -- before the running/associated counts drop.
+        #[cfg(not(test))]
+        crate::exports::run_instance_cleanup(&instance);
     }
 
-    // Run TpCallback*OnCompletion cleanup actions (the FFI lives in `exports`;
-    // host tests have no instance cleanup). C order: cs, mutex, semaphore, event,
-    // library -- before the running/associated counts drop.
-    #[cfg(not(test))]
-    crate::exports::run_instance_cleanup(&instance);
-
+    // Tail -- runs for both a real callback and a skipped (cancelled) one, so each
+    // submission's count + reference are dropped exactly once.
     // When the last in-flight callback finishes, signal any deregister completion
     // event (RtlDeregisterWaitEx async release).
     if o.num_running.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -878,15 +877,15 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
 fn object_is_finished(obj: *const ThreadpoolObject, group: bool) -> bool {
     let o = unsafe { &*obj };
     // num_running/num_associated are bumped at submit (on_submit), so they already
-    // cover queued-but-not-yet-dispatched callbacks -- no separate pending check
-    // (which would wrongly block on a cancelled carrier that will never dispatch
-    // while a single worker is busy elsewhere).
+    // cover queued-but-not-yet-dispatched callbacks. Discount cancel_pending: a
+    // cancelled submission will be skipped (not run), so a wait must not block on it
+    // -- even though its skip dispatch may be delayed behind a busy worker.
     let in_flight = if group {
         o.num_running.load(Ordering::Acquire)
     } else {
         o.num_associated.load(Ordering::Acquire)
     };
-    in_flight <= 0
+    in_flight - o.cancel_pending.load(Ordering::Acquire) <= 0
 }
 
 /// Drop one reference; free the object (and unlink it from its cleanup group) when
@@ -914,20 +913,12 @@ pub fn tp_object_cancel(obj: *mut ThreadpoolObject) {
     // unfired wait are untouched -- the wait re-fires normally after this.
     o.signaled.store(0, Ordering::Release);
     let queued = o.sched.pending();
-    if queued <= 0 {
-        return;
-    }
-    // The matching dispatches will be skipped (no-ops), so do their bookkeeping here:
-    // drop the running/associated counts on_submit bumped (else a concurrent
-    // tp_object_wait would block forever on callbacks that never run) and release the
-    // refs they took. The object stays alive via the caller's base/temp reference.
-    o.cancel_pending.store(queued, Ordering::Release);
-    for _ in 0..queued {
-        o.num_running.fetch_sub(1, Ordering::AcqRel);
-        o.num_associated.fetch_sub(1, Ordering::AcqRel);
-    }
-    for _ in 0..queued {
-        tp_object_release(obj);
+    if queued > 0 {
+        // Only MARK these queued callbacks cancellable; each one's own (skipped)
+        // dispatch drops its count + reference in the tail, so this never races a
+        // worker that is concurrently dequeuing one. object_is_finished discounts
+        // cancel_pending, so a wait doesn't block on a callback that will be skipped.
+        o.cancel_pending.fetch_add(queued, Ordering::AcqRel);
     }
 }
 
@@ -1764,10 +1755,10 @@ mod tests {
             obj.account_submit(); // as Pool::submit: refcount + running + associated
         }
 
-        tp_object_cancel(obj.as_ptr());
-        assert_eq!(obj.num_running(), 0, "cancel drops the cancelled callback's in-flight count");
+        tp_object_cancel(obj.as_ptr()); // only marks it cancellable
         dispatch_object(obj.as_ptr()); // the worker reaches the carrier -> skipped
         assert_eq!(counter.load(Ordering::Relaxed), 0, "cancelled callback must not run");
+        assert_eq!(obj.num_running(), 0, "the skip dispatch drops the cancelled callback's in-flight count");
 
         // Still usable: a fresh submit dispatches normally (not permanently disabled).
         unsafe { obj.account_submit() };
