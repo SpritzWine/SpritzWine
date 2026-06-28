@@ -621,6 +621,12 @@ unsafe impl Scheduled for ThreadpoolObject {
     }
     fn on_submit(&self) {
         self.refcount.fetch_add(1, Ordering::AcqRel);
+        // Count the callback as in-flight from submit time (before it is enqueued),
+        // not from dispatch start -- otherwise a group/non-group wait can observe a
+        // transient "finished" in the gap between the scheduler dequeue (pending--)
+        // and dispatch (running++). C does both under pool->cs.
+        self.num_running.fetch_add(1, Ordering::AcqRel);
+        self.num_associated.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -736,8 +742,8 @@ impl ThreadpoolObject {
 pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     // SAFETY: live for the callback per the scheduler's contract (refcount).
     let o = unsafe { &*obj };
-    o.num_running.fetch_add(1, Ordering::AcqRel);
-    o.num_associated.fetch_add(1, Ordering::AcqRel);
+    // num_running / num_associated were already bumped at submit (on_submit) so a
+    // concurrent wait can't see a gap; here we only run the callback and drop them.
     let mut instance = CallbackInstance::new(obj, o.may_run_long);
 
     // A cancelled submission drains its pending count + reference but skips the
@@ -1233,10 +1239,11 @@ mod tests {
         unsafe { (*o).ran.fetch_add(1, Ordering::Relaxed) };
     }
 
-    /// Timer/service on_expire that, like a real submit, bumps the refcount before
-    /// dispatch (whose release then balances it), so the test keeps owning the object.
+    /// Timer/service on_expire that, like a real submit, accounts the callback as
+    /// in-flight (refcount + running/associated) before dispatch (whose release/drops
+    /// then balance it), so the test keeps owning the object.
     fn timer_on_expire(obj: *mut ThreadpoolObject) {
-        unsafe { (*obj).add_ref() };
+        unsafe { (*obj).on_submit() };
         dispatch_object(obj);
     }
 
