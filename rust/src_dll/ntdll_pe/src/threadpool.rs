@@ -581,9 +581,11 @@ pub struct ThreadpoolObject {
     /// Like `num_running` but excluding callbacks that called TpDisassociateCallback
     /// (C `num_associated_callbacks`); a non-group wait drains on this.
     num_associated: AtomicI32,
-    /// Set by [`tp_object_cancel`]; a worker skips a cancelled object's callback
-    /// (still draining the pending count + releasing its reference).
-    cancelled: AtomicBool,
+    /// Number of *currently queued* callbacks cancelled by [`tp_object_cancel`]
+    /// (C `tp_object_cancel` removing pending entries). A worker consumes one per
+    /// skipped dispatch; future submissions are unaffected, so the object stays
+    /// usable (TpWaitForWait(.,TRUE) must not permanently disable a wait).
+    cancel_pending: AtomicI32,
     /// Owning pool (C `object->pool`), type-erased; reached via [`pool_ops`] so the
     /// object need not be generic over the pool's `Os`. Null for unbound objects.
     pub(crate) pool: *const c_void,
@@ -634,7 +636,7 @@ impl ThreadpoolObject {
             refcount: AtomicI32::new(1), // base reference
             num_running: AtomicI32::new(0),
             num_associated: AtomicI32::new(0),
-            cancelled: AtomicBool::new(false),
+            cancel_pending: AtomicI32::new(0),
             pool: core::ptr::null(),
             pool_ops: core::ptr::null(),
             group: core::ptr::null(),
@@ -725,9 +727,27 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     o.num_associated.fetch_add(1, Ordering::AcqRel);
     let mut instance = CallbackInstance::new(obj, o.may_run_long);
 
-    // A cancelled object still drains its pending count + reference, but its
-    // callback is not run (C tp_object_cancel removed it from the queue).
-    if !o.cancelled.load(Ordering::Acquire) {
+    // A cancelled submission drains its pending count + reference but skips the
+    // callback (C tp_object_cancel removed it from the queue). Only callbacks that
+    // were queued at cancel time are skipped; later submissions run normally.
+    let skip = {
+        let mut p = o.cancel_pending.load(Ordering::Acquire);
+        loop {
+            if p <= 0 {
+                break false;
+            }
+            match o.cancel_pending.compare_exchange_weak(
+                p,
+                p - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break true,
+                Err(cur) => p = cur,
+            }
+        }
+    };
+    if !skip {
         let inst = &mut instance as *mut CallbackInstance;
         match o.callback {
             Callback::Simple(cb) => cb(inst, o.userdata),
@@ -801,7 +821,15 @@ pub fn tp_object_release(obj: *mut ThreadpoolObject) {
 /// dequeues and skips). Needs the pool's workers to be draining (true during
 /// cleanup, since the submits that queued the work spawned them).
 pub fn tp_object_cancel(obj: *mut ThreadpoolObject) {
-    unsafe { &*obj }.cancelled.store(true, Ordering::Release);
+    let o = unsafe { &*obj };
+    // Cancel exactly the callbacks queued right now (C zeroes num_pending_callbacks
+    // and, for a wait, u.wait.signaled). Already-running callbacks and an armed-but-
+    // unfired wait are untouched -- the wait re-fires normally after this.
+    let queued = o.sched_state().pending();
+    if queued > 0 {
+        o.cancel_pending.store(queued, Ordering::Release);
+    }
+    o.signaled.store(0, Ordering::Release);
 }
 
 /// Wait until every queued/running callback of `obj` has finished (the C
