@@ -241,11 +241,16 @@ mod tests {
                             unsafe { free_node(recycled) };
                         }
                         None => {
-                            // Producers are joined before `done`, and values are
-                            // never re-enqueued, so an observed-empty queue under
-                            // `done` is final. (Never call dequeue() here just to
-                            // peek -- that would discard the item it returns.)
+                            // Re-check before giving up, the same intent the buggy
+                            // version had -- but PROCESS anything found (a producer
+                            // can enqueue between our empty observation and `done`),
+                            // never discard a dequeued item just to peek.
                             if done.load(Ordering::Acquire) {
+                                while let Some((value, recycled)) = q.dequeue() {
+                                    sum.fetch_add(value as usize, Ordering::Relaxed);
+                                    consumed.fetch_add(1, Ordering::Relaxed);
+                                    unsafe { free_node(recycled) };
+                                }
                                 break;
                             }
                             spin_loop();

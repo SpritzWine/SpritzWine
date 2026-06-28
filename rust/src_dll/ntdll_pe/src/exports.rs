@@ -580,3 +580,68 @@ pub extern "system" fn RtlQueueWorkItem(
     let item = Box::into_raw(Box::new(RtlWorkItem { function, context }));
     TpSimpleTryPost(rtl_work_bridge, item as *mut c_void, ptr::null())
 }
+
+// --- TpCallback*OnCompletion (instance cleanup actions) -----------------------
+
+unsafe extern "system" {
+    fn NtSetEvent(handle: *mut c_void, prev: *mut i32) -> i32;
+    fn NtReleaseSemaphore(handle: *mut c_void, count: i32, prev: *mut i32) -> i32;
+    fn NtReleaseMutant(handle: *mut c_void, prev: *mut i32) -> i32;
+    fn RtlLeaveCriticalSection(cs: *mut c_void) -> i32;
+    fn LdrUnloadDll(module: *mut c_void) -> i32;
+}
+
+/// Run the cleanup actions a callback registered via TpCallback*OnCompletion,
+/// called by dispatch_object after the callback (C order: cs, mutex, semaphore,
+/// event, library).
+pub(crate) fn run_instance_cleanup(inst: &CallbackInstance) {
+    unsafe {
+        if !inst.cleanup_critical_section.is_null() {
+            RtlLeaveCriticalSection(inst.cleanup_critical_section);
+        }
+        if inst.cleanup_mutex != 0 {
+            NtReleaseMutant(inst.cleanup_mutex as *mut c_void, ptr::null_mut());
+        }
+        if inst.cleanup_semaphore != 0 {
+            NtReleaseSemaphore(inst.cleanup_semaphore as *mut c_void, inst.cleanup_semaphore_count, ptr::null_mut());
+        }
+        if inst.cleanup_event != 0 {
+            NtSetEvent(inst.cleanup_event as *mut c_void, ptr::null_mut());
+        }
+        if !inst.cleanup_library.is_null() {
+            LdrUnloadDll(inst.cleanup_library);
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpCallbackSetEventOnCompletion(instance: *mut CallbackInstance, event: *mut c_void) {
+    unsafe { (*instance).cleanup_event = event as u64 };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpCallbackReleaseSemaphoreOnCompletion(
+    instance: *mut CallbackInstance,
+    semaphore: *mut c_void,
+    count: u32,
+) {
+    unsafe {
+        (*instance).cleanup_semaphore = semaphore as u64;
+        (*instance).cleanup_semaphore_count = count as i32;
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpCallbackReleaseMutexOnCompletion(instance: *mut CallbackInstance, mutex: *mut c_void) {
+    unsafe { (*instance).cleanup_mutex = mutex as u64 };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpCallbackLeaveCriticalSectionOnCompletion(instance: *mut CallbackInstance, cs: *mut c_void) {
+    unsafe { (*instance).cleanup_critical_section = cs };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpCallbackUnloadDllOnCompletion(instance: *mut CallbackInstance, module: *mut c_void) {
+    unsafe { (*instance).cleanup_library = module };
+}

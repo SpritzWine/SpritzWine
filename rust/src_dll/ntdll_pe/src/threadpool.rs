@@ -506,16 +506,39 @@ pub enum Callback {
 
 /// Per-callback `TP_CALLBACK_INSTANCE`. Minimal for now -- enough to pass to the
 /// callback; the TpCallback* cleanup/finalization slots are added with that API.
-#[repr(C)]
 pub struct CallbackInstance {
     object: *mut ThreadpoolObject,
+    /// The object's may-run-long hint (a full TpCallbackMayRunLong would consult it).
+    #[allow(dead_code)]
     may_run_long: bool,
     /// Cleared by TpDisassociateCallback so a non-group wait stops waiting for
     /// this callback (the C `instance.associated`).
     associated: bool,
+    /// Cleanup-on-completion actions registered by the TpCallback*OnCompletion
+    /// family, run after the callback returns (the FFI is in `exports`). 0/null = none.
+    pub(crate) cleanup_event: u64,
+    pub(crate) cleanup_semaphore: u64,
+    pub(crate) cleanup_semaphore_count: i32,
+    pub(crate) cleanup_mutex: u64,
+    pub(crate) cleanup_critical_section: *mut c_void,
+    pub(crate) cleanup_library: *mut c_void,
 }
 
 impl CallbackInstance {
+    fn new(object: *mut ThreadpoolObject, may_run_long: bool) -> Self {
+        CallbackInstance {
+            object,
+            may_run_long,
+            associated: true,
+            cleanup_event: 0,
+            cleanup_semaphore: 0,
+            cleanup_semaphore_count: 0,
+            cleanup_mutex: 0,
+            cleanup_critical_section: core::ptr::null_mut(),
+            cleanup_library: core::ptr::null_mut(),
+        }
+    }
+
     /// TpDisassociateCallback: detach this callback from its object's non-group
     /// wait. Idempotent.
     pub fn disassociate(&mut self) {
@@ -693,7 +716,7 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     let o = unsafe { &*obj };
     o.num_running.fetch_add(1, Ordering::AcqRel);
     o.num_associated.fetch_add(1, Ordering::AcqRel);
-    let mut instance = CallbackInstance { object: obj, may_run_long: o.may_run_long, associated: true };
+    let mut instance = CallbackInstance::new(obj, o.may_run_long);
 
     // A cancelled object still drains its pending count + reference, but its
     // callback is not run (C tp_object_cancel removed it from the queue).
@@ -726,11 +749,16 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
         }
     }
 
+    // Run TpCallback*OnCompletion cleanup actions (the FFI lives in `exports`;
+    // host tests have no instance cleanup). C order: cs, mutex, semaphore, event,
+    // library -- before the running/associated counts drop.
+    #[cfg(not(test))]
+    crate::exports::run_instance_cleanup(&instance);
+
     o.num_running.fetch_sub(1, Ordering::AcqRel);
     if instance.associated {
         o.num_associated.fetch_sub(1, Ordering::AcqRel);
     }
-    // (later: finalization callback + instance cleanup tasks.)
     tp_object_release(obj);
 }
 
