@@ -960,8 +960,10 @@ struct TimerEntry {
 }
 
 /// Cap on a single sleep so a lost wake bounds late-firing (and lets an idle
-/// thread re-poll cheaply) rather than stalling. 50 ms.
-const TIMER_MAX_SLEEP_100NS: i64 = 50 * 10_000;
+/// thread re-poll) rather than stalling. set_timer wakes the service on any change,
+/// so this is only a safety net; it must exceed coalescing windows (TpSetTimer
+/// window_length) for those to take effect, so 1 s rather than tens of ms.
+const TIMER_MAX_SLEEP_100NS: i64 = 1000 * 10_000;
 
 /// State guarded by `TimerQueue::lock`.
 struct TimerInner {
@@ -1110,14 +1112,31 @@ impl<Os: PoolOs> TimerQueue<Os> {
                 }
             }
 
-            let mut sleep = TIMER_MAX_SLEEP_100NS;
-            for e in inner.entries.iter() {
-                let now = if e.clock == Clock::Mono { now_mono } else { now_sys };
-                let rem = (e.deadline - now).max(0);
-                if rem < sleep {
-                    sleep = rem;
+            // Coalesce timers within their window (C get_next_timeout): wake at the
+            // latest deadline still reachable from the earliest one through the
+            // window chain, so timers falling inside a window fire together.
+            let mut rems: alloc::vec::Vec<(i64, i64)> = inner
+                .entries
+                .iter()
+                .map(|e| {
+                    let now = if e.clock == Clock::Mono { now_mono } else { now_sys };
+                    ((e.deadline - now).max(0), (e.window_ms.max(0) as i64) * 10_000)
+                })
+                .collect();
+            rems.sort_unstable_by_key(|&(rem, _)| rem);
+            let mut lower = TIMER_MAX_SLEEP_100NS;
+            let mut upper = i64::MAX;
+            for (rem, window) in rems {
+                if rem >= upper {
+                    break;
+                }
+                lower = rem;
+                let new_upper = rem.saturating_add(window);
+                if new_upper < upper {
+                    upper = new_upper;
                 }
             }
+            let sleep = lower.min(TIMER_MAX_SLEEP_100NS);
 
             let terminate = inner.objcount == 0 && inner.entries.is_empty();
             if terminate {
