@@ -334,6 +334,14 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
     pub fn set_max_workers(&self, n: i32) {
         self.max_workers.store(n, Ordering::Release);
     }
+    pub fn max_workers(&self) -> i32 {
+        self.max_workers.load(Ordering::Acquire)
+    }
+    /// Busy count (queued + in-flight callbacks) -- the C `num_busy_workers`
+    /// stand-in TpCallbackMayRunLong checks against `max_workers`.
+    pub fn busy(&self) -> i32 {
+        self.scheduler.busy()
+    }
     pub fn set_worker_timeout(&mut self, t100ns: i64) {
         self.worker_timeout_100ns = t100ns;
     }
@@ -507,10 +515,9 @@ pub enum Callback {
 /// Per-callback `TP_CALLBACK_INSTANCE`. Minimal for now -- enough to pass to the
 /// callback; the TpCallback* cleanup/finalization slots are added with that API.
 pub struct CallbackInstance {
-    object: *mut ThreadpoolObject,
-    /// The object's may-run-long hint (a full TpCallbackMayRunLong would consult it).
-    #[allow(dead_code)]
-    may_run_long: bool,
+    pub(crate) object: *mut ThreadpoolObject,
+    /// Set by the first TpCallbackMayRunLong so a repeat call short-circuits.
+    pub(crate) may_run_long: bool,
     /// Cleared by TpDisassociateCallback so a non-group wait stops waiting for
     /// this callback (the C `instance.associated`).
     associated: bool,

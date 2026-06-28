@@ -26,6 +26,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 type WinePool = Pool<ThreadpoolObject, WineOs>;
 
 const STATUS_SUCCESS: i32 = 0;
+const STATUS_TOO_MANY_THREADS: i32 = 0xC000_0129u32 as i32;
 /// TP_CALLBACK_PRIORITY_NORMAL.
 const PRIORITY_NORMAL: u8 = 1;
 
@@ -55,6 +56,8 @@ fn default_pool() -> *mut WinePool {
         return existing;
     }
     let fresh = Box::into_raw(Box::new(Pool::new(WineOs, dispatch_object)));
+    let (reserve, commit) = image_default_stack();
+    unsafe { (*fresh).set_stack_info(reserve, commit) };
     match DEFAULT_POOL.compare_exchange(ptr::null_mut(), fresh, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => fresh,
         Err(other) => {
@@ -126,7 +129,11 @@ unsafe fn bind_object(obj: *mut ThreadpoolObject, info: &EnvInfo) {
 #[unsafe(no_mangle)]
 pub extern "system" fn TpAllocPool(out: *mut *mut WinePool, _reserved: *mut c_void) -> i32 {
     let pool = Box::into_raw(Box::new(Pool::new(WineOs, dispatch_object)));
-    unsafe { *out = pool };
+    let (reserve, commit) = image_default_stack();
+    unsafe {
+        (*pool).set_stack_info(reserve, commit);
+        *out = pool;
+    }
     STATUS_SUCCESS
 }
 
@@ -524,9 +531,30 @@ pub extern "system" fn TpReleaseCleanupGroupMembers(
 // --- callback instance API ----------------------------------------------------
 
 #[unsafe(no_mangle)]
-pub extern "system" fn TpCallbackMayRunLong(_instance: *mut CallbackInstance) -> i32 {
-    // The pool spawns workers on demand, so a long-running callback is always OK.
-    STATUS_SUCCESS
+pub extern "system" fn TpCallbackMayRunLong(instance: *mut CallbackInstance) -> i32 {
+    unsafe {
+        let inst = &mut *instance;
+        if inst.may_run_long {
+            return STATUS_SUCCESS; // already promoted; idempotent
+        }
+        inst.may_run_long = true;
+        let obj = inst.object;
+        if obj.is_null() {
+            return STATUS_SUCCESS;
+        }
+        let pool = (*obj).pool as *const WinePool;
+        if pool.is_null() {
+            return STATUS_SUCCESS;
+        }
+        // At capacity there is no spare worker to free up -> the caller must not
+        // run long (the C returns STATUS_TOO_MANY_THREADS); otherwise ensure a
+        // worker stays available for the rest of the pool's work.
+        if (*pool).busy() >= (*pool).max_workers() {
+            return STATUS_TOO_MANY_THREADS;
+        }
+        (*pool).ensure_started();
+        STATUS_SUCCESS
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -592,6 +620,50 @@ unsafe extern "system" {
     fn NtReleaseMutant(handle: *mut c_void, prev: *mut i32) -> i32;
     fn RtlLeaveCriticalSection(cs: *mut c_void) -> i32;
     fn LdrUnloadDll(module: *mut c_void) -> i32;
+    fn RtlImageNtHeader(base: *const c_void) -> *const u8;
+}
+// No args -> cdecl/stdcall are identical; match heap.rs's declaration (extern "C")
+// to avoid a redeclaration-signature warning.
+unsafe extern "C" {
+    fn RtlGetCurrentPeb() -> *mut c_void;
+}
+
+/// The image's default thread stack (`OptionalHeader.SizeOfStackReserve`/`Commit`),
+/// which a new pool reports until TpSetPoolStackInformation overrides it (the C
+/// reads these from the main image at pool creation). Returns (0, 0) if unavailable.
+fn image_default_stack() -> (usize, usize) {
+    unsafe {
+        let peb = RtlGetCurrentPeb() as *const u8;
+        if peb.is_null() {
+            return (0, 0);
+        }
+        // PEB.ImageBaseAddress: +0x10 (x64) / +0x08 (x86) -- see heap.rs for the
+        // sibling ProcessHeap offset that pins this layout.
+        #[cfg(target_pointer_width = "64")]
+        let base = *(peb.add(0x10) as *const *const c_void);
+        #[cfg(target_pointer_width = "32")]
+        let base = *(peb.add(0x08) as *const *const c_void);
+        let nt = RtlImageNtHeader(base);
+        if nt.is_null() {
+            return (0, 0);
+        }
+        // OptionalHeader = nt + Signature(4) + IMAGE_FILE_HEADER(20).
+        let opt = nt.add(24);
+        // SizeOfStackReserve/Commit within the OptionalHeader (PE32+ are u64@72/80,
+        // PE32 are u32@72/76).
+        #[cfg(target_pointer_width = "64")]
+        {
+            let r = (opt.add(72) as *const u64).read_unaligned();
+            let c = (opt.add(80) as *const u64).read_unaligned();
+            (r as usize, c as usize)
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            let r = (opt.add(72) as *const u32).read_unaligned();
+            let c = (opt.add(76) as *const u32).read_unaligned();
+            (r as usize, c as usize)
+        }
+    }
 }
 
 /// Run the cleanup actions a callback registered via TpCallback*OnCompletion,
