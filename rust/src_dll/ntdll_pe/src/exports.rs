@@ -294,8 +294,10 @@ pub extern "system" fn TpSetTimer(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn TpIsTimerSet(timer: *mut ThreadpoolObject) -> u8 {
-    unsafe { (*timer).timer_set.load(Ordering::Acquire) as u8 }
+pub extern "system" fn TpIsTimerSet(timer: *mut ThreadpoolObject) -> i32 {
+    // Prototype is BOOL (4 bytes); a u8 return leaves garbage in the upper bytes
+    // that the caller reads as a nonzero BOOL.
+    unsafe { (*timer).timer_set.load(Ordering::Acquire) as i32 }
 }
 
 #[unsafe(no_mangle)]
