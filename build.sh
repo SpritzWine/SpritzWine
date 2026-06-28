@@ -70,6 +70,19 @@ done
 echo "==> [4/6] Building Wine's dlls and headers (generates headers; links libwine_ntdll into ntdll)"
 cd "$ROOT/wine"
 make -j"$JOBS" -C include
+# The PE Rust staticlib is linked into ntdll via EXTRADLLFLAGS, which makedep does
+# NOT track as an ntdll.dll prerequisite. Drop a stale ntdll.dll when its staticlib
+# is newer, so `make dlls` relinks instead of silently keeping the old code (the
+# same gotcha relink-ntdll.sh handles for the quick dev loop).
+for arch in i386 x86_64; do
+    pe=i686; [ "$arch" = x86_64 ] && pe=x86_64
+    lib="$ROOT/rust/target/$pe-pc-windows-gnullvm/release/libwine_ntdll_pe.a"
+    dll="dlls/ntdll/$arch-windows/ntdll.dll"
+    if [ -f "$lib" ] && [ -f "$dll" ] && [ "$lib" -nt "$dll" ]; then
+        echo "    PE staticlib ($pe) newer than $dll -> forcing relink"
+        rm -f "$dll"
+    fi
+done
 make -j"$JOBS" dlls
 
 echo "==> [5/6] Building the Rust FFI library (wine_api) against the fresh headers"

@@ -11,7 +11,10 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
 
 // Resolved at link against ntdll itself (the crate is linked into ntdll.dll).
-unsafe extern "C" {
+// These are WINAPI (stdcall on i386), so they must be extern "system" -- extern "C"
+// links on x86_64 (no decoration) but leaves `_Rtl*` undefined on i386, which
+// decorates stdcall as `_Rtl*@N`.
+unsafe extern "system" {
     fn RtlAllocateHeap(heap: *mut c_void, flags: u32, size: usize) -> *mut c_void;
     fn RtlReAllocateHeap(heap: *mut c_void, flags: u32, ptr: *mut c_void, size: usize) -> *mut c_void;
     fn RtlFreeHeap(heap: *mut c_void, flags: u32, ptr: *mut c_void) -> i32;

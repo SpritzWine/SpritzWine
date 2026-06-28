@@ -677,10 +677,6 @@ unsafe extern "system" {
     fn RtlLeaveCriticalSection(cs: *mut c_void) -> i32;
     fn LdrUnloadDll(module: *mut c_void) -> i32;
     fn RtlImageNtHeader(base: *const c_void) -> *const u8;
-}
-// No args -> cdecl/stdcall are identical; match heap.rs's declaration (extern "C")
-// to avoid a redeclaration-signature warning.
-unsafe extern "C" {
     fn RtlGetCurrentPeb() -> *mut c_void;
 }
 
