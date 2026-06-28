@@ -30,7 +30,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Number of `TP_CALLBACK_PRIORITY` levels (high, normal, low) -- matches the C
 /// `pool->pools[3]` ordering.
@@ -581,6 +581,9 @@ pub struct ThreadpoolObject {
     /// Like `num_running` but excluding callbacks that called TpDisassociateCallback
     /// (C `num_associated_callbacks`); a non-group wait drains on this.
     num_associated: AtomicI32,
+    /// Event to signal once the last in-flight callback finishes (0 = none); set by
+    /// RtlDeregisterWaitEx with a real completion event for its async release.
+    completion_event: AtomicU64,
     /// Number of *currently queued* callbacks cancelled by [`tp_object_cancel`]
     /// (C `tp_object_cancel` removing pending entries). A worker consumes one per
     /// skipped dispatch; future submissions are unaffected, so the object stays
@@ -635,6 +638,7 @@ impl ThreadpoolObject {
             may_run_long: false,
             refcount: AtomicI32::new(1), // base reference
             num_running: AtomicI32::new(0),
+            completion_event: AtomicU64::new(0),
             num_associated: AtomicI32::new(0),
             cancel_pending: AtomicI32::new(0),
             pool: core::ptr::null(),
@@ -713,6 +717,15 @@ impl ThreadpoolObject {
     pub fn as_ptr(&self) -> *mut ThreadpoolObject {
         self as *const ThreadpoolObject as *mut ThreadpoolObject
     }
+
+    /// Callbacks currently executing (RtlDeregisterWaitEx's in-flight check).
+    pub(crate) fn num_running(&self) -> i32 {
+        self.num_running.load(Ordering::Acquire)
+    }
+    /// Arrange to signal `event` once the last running callback finishes.
+    pub(crate) fn set_completion_event(&self, event: u64) {
+        self.completion_event.store(event, Ordering::Release);
+    }
 }
 
 /// Run one callback for `obj` (the Rust `tp_object_execute`, work/simple). This
@@ -782,7 +795,15 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     #[cfg(not(test))]
     crate::exports::run_instance_cleanup(&instance);
 
-    o.num_running.fetch_sub(1, Ordering::AcqRel);
+    // When the last in-flight callback finishes, signal any deregister completion
+    // event (RtlDeregisterWaitEx async release).
+    if o.num_running.fetch_sub(1, Ordering::AcqRel) == 1 {
+        let ev = o.completion_event.swap(0, Ordering::AcqRel);
+        if ev != 0 {
+            #[cfg(not(test))]
+            crate::exports::signal_event(ev);
+        }
+    }
     if instance.associated {
         o.num_associated.fetch_sub(1, Ordering::AcqRel);
     }

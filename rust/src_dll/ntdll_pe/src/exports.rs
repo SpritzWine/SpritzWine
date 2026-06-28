@@ -15,7 +15,7 @@ use crate::threadpool::{
 };
 use crate::io_queue::IoQueue;
 use crate::threadpool::IoCallback;
-use crate::wait_queue::{WaitOs, WaitQueue};
+use crate::wait_queue::WaitQueue;
 use crate::wine_os::WineOs;
 use alloc::boxed::Box;
 use core::ffi::c_void;
@@ -26,6 +26,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 type WinePool = Pool<ThreadpoolObject, WineOs>;
 
 const STATUS_SUCCESS: i32 = 0;
+const STATUS_PENDING: i32 = 0x103;
 const STATUS_TOO_MANY_THREADS: i32 = 0xC000_0129u32 as i32;
 /// TP_CALLBACK_PRIORITY_NORMAL.
 const PRIORITY_NORMAL: u8 = 1;
@@ -414,19 +415,35 @@ pub extern "system" fn RtlRegisterWait(
 #[unsafe(no_mangle)]
 pub extern "system" fn RtlDeregisterWaitEx(handle: *mut ThreadpoolObject, completion_event: *mut c_void) -> i32 {
     unsafe {
+        // Disarm + unbind so no further callbacks are queued.
         (*wait_queue()).obj_removed(handle);
-        // NULL => wait synchronously; INVALID_HANDLE_VALUE (-1) => don't wait;
-        // else wait, then signal the caller's completion event.
+        // Completion-event arg: INVALID_HANDLE_VALUE (-1) = block until the in-flight
+        // callback finishes (returns SUCCESS); NULL = don't block (returns PENDING if
+        // one is still running); a real event = don't block, signal it when done.
         let is_invalid = completion_event as usize == usize::MAX;
-        if !is_invalid {
+        let running = (*handle).num_running() > 0;
+        let status = if !running {
+            STATUS_SUCCESS
+        } else if is_invalid {
             tp_object_wait(handle, false);
+            STATUS_SUCCESS
+        } else {
             if !completion_event.is_null() {
-                WineOs.set_event(completion_event as u64);
+                (*handle).set_completion_event(completion_event as u64);
             }
-        }
+            STATUS_PENDING
+        };
         tp_object_release(handle);
+        status
     }
-    STATUS_SUCCESS
+}
+
+/// Signal a wait/event handle (used by dispatch_object for a deregister completion
+/// event). Best-effort; a stale handle is harmless here.
+pub(crate) fn signal_event(event: u64) {
+    unsafe {
+        NtSetEvent(event as *mut c_void, ptr::null_mut());
+    }
 }
 
 #[unsafe(no_mangle)]
