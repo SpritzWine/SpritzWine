@@ -294,6 +294,7 @@ static WAIT_QUEUE: AtomicPtr<WineWaitQueue> = AtomicPtr::new(ptr::null_mut());
 
 const INFINITE: u32 = 0xFFFF_FFFF;
 const WT_EXECUTEINIOTHREAD: u32 = 0x0000_0001;
+const WT_EXECUTEONLYONCE: u32 = 0x0000_0008;
 
 /// A signaled/timed-out wait is submitted to its pool (signaled bumps the count
 /// so the dispatch yields WAIT_OBJECT_0).
@@ -342,7 +343,7 @@ pub extern "system" fn TpAllocWait(
 pub extern "system" fn TpSetWait(wait: *mut ThreadpoolObject, handle: *mut c_void, timeout: *const i64) {
     unsafe {
         let to = if timeout.is_null() { None } else { Some(*timeout) };
-        (*wait_queue()).set_wait(wait, handle as u64, to);
+        (*wait_queue()).set_wait(wait, handle as u64, to, false);
     }
 }
 
@@ -395,7 +396,9 @@ pub extern "system" fn RtlRegisterWait(
         let alertable = (flags & WT_EXECUTEINIOTHREAD) != 0;
         (*wait_queue()).obj_added(obj, alertable);
         let to = if milliseconds == INFINITE { None } else { Some(-(milliseconds as i64 * 10_000)) };
-        (*wait_queue()).set_wait(obj, handle as u64, to);
+        // Without WT_EXECUTEONLYONCE the wait re-fires on every signal.
+        let repeating = (flags & WT_EXECUTEONLYONCE) == 0;
+        (*wait_queue()).set_wait(obj, handle as u64, to, repeating);
         *out = obj;
     }
     STATUS_SUCCESS

@@ -50,6 +50,11 @@ struct WaitEntry {
     handle: u64,   // 0 = reserved (no handle armed)
     deadline: i64, // absolute system-time 100ns; NO_DEADLINE = infinite
     serial: u32,   // bumped on handle change, to drop a stale signal
+    /// Repeating (legacy RtlRegisterWait without WT_EXECUTEONLYONCE): re-arm after
+    /// each fire instead of disarming. Tp* waits and ONLYONCE are one-shot.
+    repeating: bool,
+    /// Re-arm timeout (relative 100ns; NO_DEADLINE = no timeout) for a repeating wait.
+    rearm_rel: i64,
 }
 
 struct Bucket<Os: WaitOs> {
@@ -125,7 +130,14 @@ impl<Os: WaitOs> WaitQueue<Os> {
             target = bucket;
         }
         let bk = unsafe { &mut *target };
-        bk.entries.push(WaitEntry { obj, handle: 0, deadline: NO_DEADLINE, serial: 0 });
+        bk.entries.push(WaitEntry {
+            obj,
+            handle: 0,
+            deadline: NO_DEADLINE,
+            serial: 0,
+            repeating: false,
+            rearm_rel: NO_DEADLINE,
+        });
         bk.objcount += 1;
         self.lock.unlock();
     }
@@ -144,11 +156,18 @@ impl<Os: WaitOs> WaitQueue<Os> {
 
     /// Arm / re-arm / disarm a wait (C `TpSetWait`). `handle == 0` disarms;
     /// `timeout`: `None` = no timeout, `Some(v<0)` = relative, `Some(v>=0)` =
-    /// absolute (v==0 fires on the next scan).
+    /// absolute (v==0 fires on the next scan). `repeating` = re-arm after each fire
+    /// (legacy RtlRegisterWait without WT_EXECUTEONLYONCE); Tp* waits pass false.
     ///
     /// # Safety
     /// `obj` must be bound via [`obj_added`].
-    pub unsafe fn set_wait(&self, obj: *mut ThreadpoolObject, handle: u64, timeout: Option<i64>) {
+    pub unsafe fn set_wait(
+        &self,
+        obj: *mut ThreadpoolObject,
+        handle: u64,
+        timeout: Option<i64>,
+        repeating: bool,
+    ) {
         self.lock.lock();
         let Some((b, idx)) = self.find(obj) else {
             self.lock.unlock();
@@ -166,6 +185,12 @@ impl<Os: WaitOs> WaitQueue<Os> {
             }
         } else {
             NO_DEADLINE
+        };
+        // Relative re-arm interval for a repeating wait (no timeout stays infinite).
+        e.repeating = repeating;
+        e.rearm_rel = match timeout {
+            Some(v) if v < 0 => -v,
+            _ => NO_DEADLINE,
         };
         if !same {
             e.serial = e.serial.wrapping_add(1);
@@ -221,8 +246,13 @@ impl<Os: WaitOs> WaitQueue<Os> {
                 }
                 if e.deadline <= now {
                     to_fire.push(e.obj); // timed out
-                    e.handle = 0;
-                    e.deadline = NO_DEADLINE; // one-shot disarm
+                    if e.repeating {
+                        // Re-arm with a fresh timeout (handle stays armed).
+                        e.deadline = if e.rearm_rel == NO_DEADLINE { NO_DEADLINE } else { now + e.rearm_rel };
+                    } else {
+                        e.handle = 0;
+                        e.deadline = NO_DEADLINE; // one-shot disarm
+                    }
                 } else {
                     handles.push(e.handle);
                     metas.push((e.obj, e.serial));
@@ -260,8 +290,15 @@ impl<Os: WaitOs> WaitQueue<Os> {
                         .iter()
                         .position(|e| e.obj == obj && e.serial == serial && e.handle != 0)
                     {
-                        bk2.entries[idx].handle = 0;
-                        bk2.entries[idx].deadline = NO_DEADLINE; // one-shot disarm
+                        let e = &mut bk2.entries[idx];
+                        if e.repeating {
+                            // Re-arm: keep the handle, reset the relative timeout.
+                            let now = self.os.now_system_100ns();
+                            e.deadline = if e.rearm_rel == NO_DEADLINE { NO_DEADLINE } else { now + e.rearm_rel };
+                        } else {
+                            e.handle = 0;
+                            e.deadline = NO_DEADLINE; // one-shot disarm
+                        }
                         fire = true;
                     }
                     self.lock.unlock();
@@ -477,9 +514,9 @@ mod tests {
 
         // Arm the signaled wait (no timeout), then signal it.
         let h = reg.create_event();
-        unsafe { wq.set_wait(o_sig.as_ptr(), h, None) };
+        unsafe { wq.set_wait(o_sig.as_ptr(), h, None, false) };
         // Arm the timeout wait for ~20 ms, never signaled.
-        unsafe { wq.set_wait(o_to.as_ptr(), reg.create_event(), Some(-(20 * 10_000))) };
+        unsafe { wq.set_wait(o_to.as_ptr(), reg.create_event(), Some(-(20 * 10_000)), false) };
 
         reg.set_event(h);
         spin_until(|| s_sig.fired.load(Ordering::Relaxed) == 1, "signaled wait");
@@ -492,6 +529,35 @@ mod tests {
             wq.obj_removed(o_sig.as_ptr());
             wq.obj_removed(o_to.as_ptr());
         }
+        wq.shutdown();
+    }
+
+    /// A repeating wait (RtlRegisterWait without WT_EXECUTEONLYONCE) re-fires on
+    /// every signal; a one-shot fires only once.
+    #[test]
+    fn wait_repeating_refires() {
+        let reg = Arc::new(MockReg::new());
+        let s = Box::new(WaitState { fired: AtomicI32::new(0), result: AtomicU32::new(123) });
+        let o = Box::new(ThreadpoolObject::new_wait(
+            wait_cb,
+            Box::as_ref(&s) as *const WaitState as *mut c_void,
+            1,
+        ));
+        let os = MockWaitOs { reg: reg.clone(), handles: Mutex::new(Vec::new()) };
+        let wq: Box<WaitQueue<MockWaitOs>> = Box::new(WaitQueue::new(os, wait_on_signal));
+        let wq: &WaitQueue<MockWaitOs> = &wq;
+
+        unsafe { wq.obj_added(o.as_ptr(), false) };
+        let h = reg.create_event();
+        unsafe { wq.set_wait(o.as_ptr(), h, None, true) }; // repeating, no timeout
+
+        reg.set_event(h);
+        spin_until(|| s.fired.load(Ordering::Relaxed) >= 1, "first fire");
+        reg.set_event(h);
+        spin_until(|| s.fired.load(Ordering::Relaxed) >= 2, "second fire (re-armed)");
+        assert_eq!(s.result.load(Ordering::Relaxed), WAIT_OBJECT_0);
+
+        unsafe { wq.obj_removed(o.as_ptr()) };
         wq.shutdown();
     }
 }
