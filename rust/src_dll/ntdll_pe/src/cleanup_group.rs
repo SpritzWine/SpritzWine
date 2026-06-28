@@ -88,7 +88,12 @@ impl Group {
                     cb(o.userdata(), userdata);
                 }
             }
-            tp_object_release(m); // the object's base reference
+            // Drop the object's base reference -- but a simple object already dropped
+            // its own at TpSimpleTryPost, so the group must not (C skips
+            // TP_OBJECT_TYPE_SIMPLE here); otherwise we'd over-release it.
+            if !o.is_simple() {
+                tp_object_release(m);
+            }
             tp_object_release(m); // the temp reference -> frees the object
         }
     }

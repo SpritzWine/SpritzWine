@@ -610,6 +610,9 @@ pub struct ThreadpoolObject {
     /// RtlRegisterWait objects: the RTL callback the wait dispatch bridges to
     /// (C `object->u.wait.rtl_callback`); `userdata` is its context.
     pub(crate) rtl_wait_callback: Option<RtlWaitOrTimerCallback>,
+    /// TP_CALLBACK_ENVIRON.FinalizationCallback: run once after the main callback
+    /// (C tp_object_execute), before the instance cleanup tasks.
+    pub(crate) finalization_callback: Option<SimpleCallback>,
     /// I/O objects only: the pending/completion state (C `object->u.io`). `None`
     /// for every other object type, so non-I/O objects pay one word.
     pub(crate) io: Option<Box<crate::io_queue::IoState>>,
@@ -655,12 +658,17 @@ impl ThreadpoolObject {
             timer_set: AtomicBool::new(false),
             signaled: AtomicI32::new(0),
             rtl_wait_callback: None,
+            finalization_callback: None,
             io: None,
         }
     }
 
     pub(crate) fn set_rtl_wait_callback(&mut self, cb: RtlWaitOrTimerCallback) {
         self.rtl_wait_callback = Some(cb);
+    }
+
+    pub(crate) fn set_finalization_callback(&mut self, cb: Option<SimpleCallback>) {
+        self.finalization_callback = cb;
     }
 
     pub(crate) fn set_pool(&mut self, pool: *const c_void, ops: *const PoolOps) {
@@ -727,6 +735,11 @@ impl ThreadpoolObject {
     /// Callbacks currently executing (RtlDeregisterWaitEx's in-flight check).
     pub(crate) fn num_running(&self) -> i32 {
         self.num_running.load(Ordering::Acquire)
+    }
+    /// A simple callback (TpSimpleTryPost) has no TP_* handle and dropped its base
+    /// reference at post time, so the cleanup group must not drop one for it.
+    pub(crate) fn is_simple(&self) -> bool {
+        matches!(self.callback, Callback::Simple(_))
     }
     /// Arrange to signal `event` once the last running callback finishes.
     pub(crate) fn set_completion_event(&self, event: u64) {
@@ -796,6 +809,11 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
                 }
             }
         }
+
+        // Finalization callback runs right after the main callback (C tp_object_execute).
+        if let Some(fin) = o.finalization_callback {
+            fin(&mut instance as *mut CallbackInstance, o.userdata);
+        }
     }
 
     // Run TpCallback*OnCompletion cleanup actions (the FFI lives in `exports`;
@@ -824,12 +842,16 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
 /// Callback drops a callback from the latter only).
 fn object_is_finished(obj: *const ThreadpoolObject, group: bool) -> bool {
     let o = unsafe { &*obj };
+    // num_running/num_associated are bumped at submit (on_submit), so they already
+    // cover queued-but-not-yet-dispatched callbacks -- no separate pending check
+    // (which would wrongly block on a cancelled carrier that will never dispatch
+    // while a single worker is busy elsewhere).
     let in_flight = if group {
         o.num_running.load(Ordering::Acquire)
     } else {
         o.num_associated.load(Ordering::Acquire)
     };
-    o.sched.pending() <= 0 && in_flight <= 0
+    in_flight <= 0
 }
 
 /// Drop one reference; free the object (and unlink it from its cleanup group) when

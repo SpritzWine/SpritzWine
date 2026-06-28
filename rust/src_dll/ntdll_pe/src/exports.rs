@@ -91,21 +91,34 @@ struct EnvInfo {
     priority: u8,
     group: *const Group,
     cancel_cb: Option<extern "system" fn(*mut c_void, *mut c_void)>,
+    finalization: Option<SimpleCallback>,
 }
 
 unsafe fn parse_env(env: *const c_void) -> EnvInfo {
     if env.is_null() {
-        return EnvInfo { pool: default_pool(), priority: PRIORITY_NORMAL, group: ptr::null(), cancel_cb: None };
+        return EnvInfo {
+            pool: default_pool(),
+            priority: PRIORITY_NORMAL,
+            group: ptr::null(),
+            cancel_cb: None,
+            finalization: None,
+        };
     }
     let e = unsafe { &*(env as *const TpCallbackEnviron) };
     let pool = if e.pool.is_null() { default_pool() } else { e.pool };
     // CallbackPriority is only present from version 3.
     let priority = if e.version >= 3 { (e.callback_priority as u8).min(2) } else { PRIORITY_NORMAL };
+    let finalization = if e.finalization_callback.is_null() {
+        None
+    } else {
+        Some(unsafe { core::mem::transmute::<*mut c_void, SimpleCallback>(e.finalization_callback) })
+    };
     EnvInfo {
         pool,
         priority,
         group: e.cleanup_group as *const Group,
         cancel_cb: e.cleanup_group_cancel_callback,
+        finalization,
     }
 }
 
@@ -118,6 +131,7 @@ unsafe fn bind_object(obj: *mut ThreadpoolObject, info: &EnvInfo) {
         (*info.pool).add_ref();
         (*info.pool).ensure_started();
         (*obj).set_pool(info.pool as *const c_void, &WINE_POOL_OPS);
+        (*obj).set_finalization_callback(info.finalization);
         if !info.group.is_null() {
             (*obj).set_group_cancel_callback(info.cancel_cb);
             (*info.group).add_member(obj);
@@ -399,7 +413,7 @@ pub extern "system" fn RtlRegisterWait(
     unsafe {
         let obj = Box::into_raw(Box::new(ThreadpoolObject::new_wait(rtl_wait_bridge, context, PRIORITY_NORMAL)));
         (*obj).set_rtl_wait_callback(callback);
-        let info = EnvInfo { pool: default_pool(), priority: PRIORITY_NORMAL, group: ptr::null(), cancel_cb: None };
+        let info = EnvInfo { pool: default_pool(), priority: PRIORITY_NORMAL, group: ptr::null(), cancel_cb: None, finalization: None };
         bind_object(obj, &info);
         let alertable = (flags & WT_EXECUTEINIOTHREAD) != 0;
         (*wait_queue()).obj_added(obj, alertable);
