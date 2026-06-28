@@ -27,6 +27,7 @@ type WinePool = Pool<ThreadpoolObject, WineOs>;
 
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_PENDING: i32 = 0x103;
+const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
 const STATUS_TOO_MANY_THREADS: i32 = 0xC000_0129u32 as i32;
 /// TP_CALLBACK_PRIORITY_NORMAL.
 const PRIORITY_NORMAL: u8 = 1;
@@ -94,32 +95,36 @@ struct EnvInfo {
     finalization: Option<SimpleCallback>,
 }
 
-unsafe fn parse_env(env: *const c_void) -> EnvInfo {
+unsafe fn parse_env(env: *const c_void) -> Result<EnvInfo, i32> {
     if env.is_null() {
-        return EnvInfo {
+        return Ok(EnvInfo {
             pool: default_pool(),
             priority: PRIORITY_NORMAL,
             group: ptr::null(),
             cancel_cb: None,
             finalization: None,
-        };
+        });
     }
     let e = unsafe { &*(env as *const TpCallbackEnviron) };
+    // Version 3 carries CallbackPriority, which must be HIGH/NORMAL/LOW (0..=2);
+    // anything else is rejected (C tp_object_initialize).
+    if e.version == 3 && e.callback_priority > 2 {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
     let pool = if e.pool.is_null() { default_pool() } else { e.pool };
-    // CallbackPriority is only present from version 3.
     let priority = if e.version >= 3 { (e.callback_priority as u8).min(2) } else { PRIORITY_NORMAL };
     let finalization = if e.finalization_callback.is_null() {
         None
     } else {
         Some(unsafe { core::mem::transmute::<*mut c_void, SimpleCallback>(e.finalization_callback) })
     };
-    EnvInfo {
+    Ok(EnvInfo {
         pool,
         priority,
         group: e.cleanup_group as *const Group,
         cancel_cb: e.cleanup_group_cancel_callback,
         finalization,
-    }
+    })
 }
 
 /// Bind a freshly-created object to its pool (+ group): account it, take a pool
@@ -183,7 +188,7 @@ pub extern "system" fn TpAllocWork(
     environment: *const c_void,
 ) -> i32 {
     unsafe {
-        let info = parse_env(environment);
+        let info = match parse_env(environment) { Ok(i) => i, Err(s) => return s };
         let obj = Box::into_raw(Box::new(ThreadpoolObject::new_work(callback, userdata, info.priority)));
         bind_object(obj, &info);
         *out = obj;
@@ -200,6 +205,7 @@ pub extern "system" fn TpPostWork(work: *mut ThreadpoolObject) {
 pub extern "system" fn TpReleaseWork(work: *mut ThreadpoolObject) {
     // Drop the base reference; the allocation frees once outstanding callbacks
     // drain (each holds a reference).
+    unsafe { (*work).set_shutdown() };
     tp_object_release(work);
 }
 
@@ -220,7 +226,7 @@ pub extern "system" fn TpSimpleTryPost(
     environment: *const c_void,
 ) -> i32 {
     unsafe {
-        let info = parse_env(environment);
+        let info = match parse_env(environment) { Ok(i) => i, Err(s) => return s };
         let obj = Box::into_raw(Box::new(ThreadpoolObject::new_simple(callback, userdata, info.priority)));
         bind_object(obj, &info);
         (*obj).submit_to_pool();
@@ -264,7 +270,7 @@ pub extern "system" fn TpAllocTimer(
     environment: *const c_void,
 ) -> i32 {
     unsafe {
-        let info = parse_env(environment);
+        let info = match parse_env(environment) { Ok(i) => i, Err(s) => return s };
         let obj = Box::into_raw(Box::new(ThreadpoolObject::new_timer(callback, userdata, info.priority)));
         bind_object(obj, &info);
         (*timer_queue()).obj_added();
@@ -303,6 +309,7 @@ pub extern "system" fn TpWaitForTimer(timer: *mut ThreadpoolObject, cancel_pendi
 #[unsafe(no_mangle)]
 pub extern "system" fn TpReleaseTimer(timer: *mut ThreadpoolObject) {
     unsafe {
+        (*timer).set_shutdown();
         (*timer_queue()).set_timer(timer, None, 0, 0); // disarm before free
         (*timer_queue()).obj_removed();
         tp_object_release(timer);
@@ -352,7 +359,7 @@ pub extern "system" fn TpAllocWait(
     environment: *const c_void,
 ) -> i32 {
     unsafe {
-        let info = parse_env(environment);
+        let info = match parse_env(environment) { Ok(i) => i, Err(s) => return s };
         let obj = Box::into_raw(Box::new(ThreadpoolObject::new_wait(callback, userdata, info.priority)));
         bind_object(obj, &info);
         (*wait_queue()).obj_added(obj, false);
@@ -380,6 +387,7 @@ pub extern "system" fn TpWaitForWait(wait: *mut ThreadpoolObject, cancel_pending
 #[unsafe(no_mangle)]
 pub extern "system" fn TpReleaseWait(wait: *mut ThreadpoolObject) {
     unsafe {
+        (*wait).set_shutdown();
         (*wait_queue()).obj_removed(wait);
         tp_object_release(wait);
     }
@@ -502,7 +510,7 @@ pub extern "system" fn TpAllocIoCompletion(
     environment: *const c_void,
 ) -> i32 {
     unsafe {
-        let info = parse_env(environment);
+        let info = match parse_env(environment) { Ok(i) => i, Err(s) => return s };
         let obj = Box::into_raw(Box::new(ThreadpoolObject::new_io(callback, userdata, info.priority)));
         bind_object(obj, &info);
         (*io_queue()).obj_added(obj, file as u64);
@@ -532,6 +540,7 @@ pub extern "system" fn TpWaitForIoCompletion(io: *mut ThreadpoolObject, cancel_p
 #[unsafe(no_mangle)]
 pub extern "system" fn TpReleaseIoCompletion(io: *mut ThreadpoolObject) {
     unsafe {
+        (*io).set_shutdown();
         (*io_queue()).obj_removed();
         tp_object_release(io);
     }

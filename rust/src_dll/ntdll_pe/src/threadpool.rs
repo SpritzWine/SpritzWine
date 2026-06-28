@@ -584,6 +584,10 @@ pub struct ThreadpoolObject {
     /// Event to signal once the last in-flight callback finishes (0 = none); set by
     /// RtlDeregisterWaitEx with a real completion event for its async release.
     completion_event: AtomicU64,
+    /// Set by TpRelease*/a finished simple callback (C `object->shutdown`). A cleanup
+    /// group skips its cancel callback + the base release for a shutdown object (its
+    /// callback already ran or it was explicitly released), unlike a cancelled one.
+    shutdown: AtomicBool,
     /// Number of *currently queued* callbacks cancelled by [`tp_object_cancel`]
     /// (C `tp_object_cancel` removing pending entries). A worker consumes one per
     /// skipped dispatch; future submissions are unaffected, so the object stays
@@ -648,6 +652,7 @@ impl ThreadpoolObject {
             refcount: AtomicI32::new(1), // base reference
             num_running: AtomicI32::new(0),
             completion_event: AtomicU64::new(0),
+            shutdown: AtomicBool::new(false),
             num_associated: AtomicI32::new(0),
             cancel_pending: AtomicI32::new(0),
             pool: core::ptr::null(),
@@ -741,6 +746,13 @@ impl ThreadpoolObject {
     pub(crate) fn is_simple(&self) -> bool {
         matches!(self.callback, Callback::Simple(_))
     }
+    /// C `object->shutdown`: set by TpRelease* / a finished simple callback.
+    pub(crate) fn set_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+    pub(crate) fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
     /// Arrange to signal `event` once the last running callback finishes.
     pub(crate) fn set_completion_event(&self, event: u64) {
         self.completion_event.store(event, Ordering::Release);
@@ -813,6 +825,12 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
         // Finalization callback runs right after the main callback (C tp_object_execute).
         if let Some(fin) = o.finalization_callback {
             fin(&mut instance as *mut CallbackInstance, o.userdata);
+        }
+
+        // Simple callbacks auto-shutdown after running (C tp_object_execute) -- a
+        // cleanup group then won't fire its cancel callback for this (completed) object.
+        if o.is_simple() {
+            o.set_shutdown();
         }
     }
 

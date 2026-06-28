@@ -83,16 +83,20 @@ impl Group {
         for m in members {
             tp_object_wait(m, true); // wait for in-flight callbacks
             let o = unsafe { &*m };
-            if cancel_pending {
-                if let Some(cb) = o.group_cancel_callback {
-                    cb(o.userdata(), userdata);
+            // A shutdown object (its callback already ran, or it was TpRelease*'d)
+            // gets neither the cancel callback nor a base release here (C gates both
+            // on !object->shutdown); only a still-pending/cancelled object does.
+            if !o.is_shutdown() {
+                if cancel_pending {
+                    if let Some(cb) = o.group_cancel_callback {
+                        cb(o.userdata(), userdata);
+                    }
                 }
-            }
-            // Drop the object's base reference -- but a simple object already dropped
-            // its own at TpSimpleTryPost, so the group must not (C skips
-            // TP_OBJECT_TYPE_SIMPLE here); otherwise we'd over-release it.
-            if !o.is_simple() {
-                tp_object_release(m);
+                // A simple object already dropped its own base ref at TpSimpleTryPost,
+                // so the group must not (C skips TP_OBJECT_TYPE_SIMPLE).
+                if !o.is_simple() {
+                    tp_object_release(m);
+                }
             }
             tp_object_release(m); // the temp reference -> frees the object
         }
