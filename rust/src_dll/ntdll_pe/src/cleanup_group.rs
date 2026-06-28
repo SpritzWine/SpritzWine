@@ -196,4 +196,30 @@ mod tests {
         group.release_members(false, core::ptr::null_mut());
         assert_eq!(counter.load(Ordering::Relaxed), 0, "no cancel -> no cancel callback");
     }
+
+    /// Regression (conformance test_tp_group_cancel 1028): a *shutdown* member -- its
+    /// callback already ran, or it was TpRelease*'d -- must NOT get the group cancel
+    /// callback even on a cancelling release, unlike a still-pending member (which
+    /// `release_members_runs_cancel_callback_and_frees` covers).
+    #[test]
+    fn release_members_skips_cancel_for_shutdown_member() {
+        let counter = AtomicI32::new(0);
+        let group = Group::new();
+        let mut obj =
+            ThreadpoolObject::new_work(noop_work, &counter as *const AtomicI32 as *mut c_void, 1);
+        obj.set_group_cancel_callback(Some(cancel_cb));
+        let raw = Box::into_raw(Box::new(obj));
+        unsafe {
+            group.add_member(raw);
+            (*raw).set_shutdown(); // as if TpReleaseWork / a finished simple callback ran
+        }
+
+        // cancel = true, but the shutdown member must be left alone.
+        group.release_members(true, core::ptr::null_mut());
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "shutdown member: no group cancel callback");
+
+        // release_members skipped the shutdown member's base ref (it would have been
+        // dropped by TpReleaseWork); drop it now to free the object.
+        crate::threadpool::tp_object_release(raw);
+    }
 }

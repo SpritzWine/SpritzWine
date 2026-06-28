@@ -1742,4 +1742,76 @@ mod tests {
         }
         tq.shutdown();
     }
+
+    /// Regression (conformance test_tp_wait / the cancel cluster): tp_object_cancel
+    /// skips only the callbacks queued at cancel time, drops their in-flight count,
+    /// and leaves the object USABLE -- it must not permanently disable it (the bug
+    /// that stranded every TpWaitForWait(.,TRUE) re-use).
+    #[test]
+    fn cancel_skips_queued_then_object_reusable() {
+        extern "system" fn count_work(_i: *mut CallbackInstance, ud: *mut c_void, _w: *mut c_void) {
+            unsafe { (*(ud as *const AtomicI32)).fetch_add(1, Ordering::Relaxed) };
+        }
+        let counter = AtomicI32::new(0);
+        let obj = Box::new(ThreadpoolObject::new_work(
+            count_work,
+            &counter as *const AtomicI32 as *mut c_void,
+            1,
+        ));
+        let sched = Scheduler::new();
+        unsafe {
+            sched.submit(obj.as_ptr()); // a queued callback (object num_pending = 1)
+            obj.account_submit(); // as Pool::submit: refcount + running + associated
+        }
+
+        tp_object_cancel(obj.as_ptr());
+        assert_eq!(obj.num_running(), 0, "cancel drops the cancelled callback's in-flight count");
+        dispatch_object(obj.as_ptr()); // the worker reaches the carrier -> skipped
+        assert_eq!(counter.load(Ordering::Relaxed), 0, "cancelled callback must not run");
+
+        // Still usable: a fresh submit dispatches normally (not permanently disabled).
+        unsafe { obj.account_submit() };
+        dispatch_object(obj.as_ptr());
+        assert_eq!(counter.load(Ordering::Relaxed), 1, "object reusable after cancel");
+        // (the one un-drained scheduler carrier is reclaimed at process exit)
+    }
+
+    /// Regression (conformance test_tp_window_length 1602): a later timer whose
+    /// deadline falls inside an earlier timer's window_length coalesces with it --
+    /// the earlier timer is held past its raw deadline so they fire together.
+    #[test]
+    fn timer_window_coalesces() {
+        let fired: Vec<AtomicI32> = (0..2).map(|_| AtomicI32::new(0)).collect();
+        let t1 = Box::new(ThreadpoolObject::new_timer(
+            record_timer_cb,
+            &fired[0] as *const AtomicI32 as *mut c_void,
+            1,
+        ));
+        let t2 = Box::new(ThreadpoolObject::new_timer(
+            record_timer_cb,
+            &fired[1] as *const AtomicI32 as *mut c_void,
+            1,
+        ));
+        let tq = Box::new(TimerQueue::new(TestOs::new(), timer_on_expire as fn(*mut ThreadpoolObject)));
+        let tq: &TimerQueue<TestOs> = &tq;
+        tq.obj_added();
+        tq.obj_added();
+        unsafe {
+            // t1 due in ~30 ms but with a 500 ms window; t2 due in ~120 ms, no window.
+            // t2 is inside t1's window -> they coalesce and fire together near 120 ms.
+            tq.set_timer(t1.as_ptr(), Some(-(30 * 10_000)), 0, 500);
+            tq.set_timer(t2.as_ptr(), Some(-(120 * 10_000)), 0, 0);
+        }
+        // Mid-window: t1's raw deadline (30 ms) has long passed, but it is held for the
+        // merge -- without coalescing it would already have fired.
+        thread::sleep(Duration::from_millis(70));
+        assert_eq!(fired[0].load(Ordering::Relaxed), 0, "earlier timer fired at its raw deadline (not coalesced)");
+        spin_until(
+            || fired[0].load(Ordering::Relaxed) == 1 && fired[1].load(Ordering::Relaxed) == 1,
+            "both timers fire (coalesced)",
+        );
+        tq.obj_removed();
+        tq.obj_removed();
+        tq.shutdown();
+    }
 }
