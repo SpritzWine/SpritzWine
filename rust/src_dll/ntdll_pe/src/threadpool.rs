@@ -744,11 +744,10 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     let o = unsafe { &*obj };
     // num_running / num_associated were already bumped at submit (on_submit) so a
     // concurrent wait can't see a gap; here we only run the callback and drop them.
-    let mut instance = CallbackInstance::new(obj, o.may_run_long);
-
-    // A cancelled submission drains its pending count + reference but skips the
-    // callback (C tp_object_cancel removed it from the queue). Only callbacks that
-    // were queued at cancel time are skipped; later submissions run normally.
+    // A cancelled submission is skipped entirely: tp_object_cancel already did the
+    // running/associated/ref bookkeeping (so a concurrent wait isn't blocked on a
+    // callback that will never run); just let the carrier drain here. Only callbacks
+    // queued at cancel time are skipped; later submissions run normally.
     let skip = {
         let mut p = o.cancel_pending.load(Ordering::Acquire);
         loop {
@@ -766,7 +765,11 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
             }
         }
     };
-    if !skip {
+    if skip {
+        return;
+    }
+    let mut instance = CallbackInstance::new(obj, o.may_run_long);
+    {
         let inst = &mut instance as *mut CallbackInstance;
         match o.callback {
             Callback::Simple(cb) => cb(inst, o.userdata),
@@ -852,11 +855,23 @@ pub fn tp_object_cancel(obj: *mut ThreadpoolObject) {
     // Cancel exactly the callbacks queued right now (C zeroes num_pending_callbacks
     // and, for a wait, u.wait.signaled). Already-running callbacks and an armed-but-
     // unfired wait are untouched -- the wait re-fires normally after this.
-    let queued = o.sched_state().pending();
-    if queued > 0 {
-        o.cancel_pending.store(queued, Ordering::Release);
-    }
     o.signaled.store(0, Ordering::Release);
+    let queued = o.sched.pending();
+    if queued <= 0 {
+        return;
+    }
+    // The matching dispatches will be skipped (no-ops), so do their bookkeeping here:
+    // drop the running/associated counts on_submit bumped (else a concurrent
+    // tp_object_wait would block forever on callbacks that never run) and release the
+    // refs they took. The object stays alive via the caller's base/temp reference.
+    o.cancel_pending.store(queued, Ordering::Release);
+    for _ in 0..queued {
+        o.num_running.fetch_sub(1, Ordering::AcqRel);
+        o.num_associated.fetch_sub(1, Ordering::AcqRel);
+    }
+    for _ in 0..queued {
+        tp_object_release(obj);
+    }
 }
 
 /// Wait until every queued/running callback of `obj` has finished (the C

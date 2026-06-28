@@ -423,6 +423,10 @@ pub extern "system" fn RtlDeregisterWaitEx(handle: *mut ThreadpoolObject, comple
         let is_invalid = completion_event as usize == usize::MAX;
         let running = (*handle).num_running() > 0;
         let status = if !running {
+            // Nothing in flight: signal a provided completion event right away.
+            if !completion_event.is_null() && !is_invalid {
+                signal_event(completion_event as u64);
+            }
             STATUS_SUCCESS
         } else if is_invalid {
             tp_object_wait(handle, false);
