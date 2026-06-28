@@ -54,6 +54,9 @@ mod rt {
 }
 
 pub mod cleanup_group;
+// The ntdll Tp*/Rtl* exports; real build only (use the WineOs FFI backend).
+#[cfg(not(test))]
+pub mod exports;
 pub mod heap;
 pub mod io_queue;
 pub mod rtl_compress;

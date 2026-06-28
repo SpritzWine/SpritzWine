@@ -251,6 +251,10 @@ pub struct Pool<T: Scheduled, Os: PoolOs> {
     max_workers: AtomicI32,
     /// Objects bound to the pool; keeps the last worker alive while > 0 (C `objcount`).
     objcount: AtomicI32,
+    /// Lifetime refcount (C `pool->refcount`): base 1, +1 per spawned worker; the
+    /// allocation is freed when the last reference drops (so TpReleasePool can
+    /// free a pool whose workers are still exiting).
+    refcount: AtomicI32,
     shutdown: AtomicBool,
     /// Futex generation; bumped before each submit-wake so a worker between
     /// reading it and sleeping cannot miss the wake.
@@ -269,8 +273,14 @@ unsafe impl<T: Scheduled, Os: PoolOs> Send for Pool<T, Os> {}
 extern "system" fn worker_entry<T: Scheduled, Os: PoolOs>(arg: *mut c_void) -> u32 {
     // SAFETY: `arg` is the `&Pool` passed to `spawn`, alive for the worker's life
     // (refcount in the real build; the test joins before drop).
-    let pool = unsafe { &*(arg as *const Pool<T, Os>) };
-    pool.run_worker();
+    let pool = arg as *mut Pool<T, Os>;
+    unsafe { (*pool).run_worker() };
+    // Drop this worker's reference; free the pool if it was the last (the C
+    // tp_threadpool_release). Host-test pools keep their base ref (owned by the
+    // test), so this never frees there.
+    if unsafe { (*pool).release_ref() } {
+        drop(unsafe { Box::from_raw(pool) });
+    }
     0
 }
 
@@ -282,12 +292,23 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
             min_workers: AtomicI32::new(0),
             max_workers: AtomicI32::new(500),
             objcount: AtomicI32::new(0),
+            refcount: AtomicI32::new(1), // base reference
             shutdown: AtomicBool::new(false),
             update: AtomicU32::new(0),
             worker_timeout_100ns: WORKER_TIMEOUT_100NS,
             run,
             os,
         }
+    }
+
+    /// Take a pool reference (C `tp_threadpool_lock`'s refcount bump; each bound
+    /// object holds one).
+    pub fn add_ref(&self) {
+        self.refcount.fetch_add(1, Ordering::AcqRel);
+    }
+    /// Drop one pool reference; returns true if it was the last (caller frees).
+    pub fn release_ref(&self) -> bool {
+        self.refcount.fetch_sub(1, Ordering::AcqRel) == 1
     }
 
     pub fn num_workers(&self) -> i32 {
@@ -321,9 +342,11 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
     /// callers don't over-spawn; gives the slot back on failure. Returns success.
     fn spawn_one(&self) -> bool {
         self.num_workers.fetch_add(1, Ordering::AcqRel);
+        self.refcount.fetch_add(1, Ordering::AcqRel); // the worker holds a pool ref
         if self.os.spawn(worker_entry::<T, Os>, self as *const _ as *mut c_void) {
             true
         } else {
+            self.refcount.fetch_sub(1, Ordering::AcqRel);
             self.num_workers.fetch_sub(1, Ordering::AcqRel);
             false
         }
@@ -473,6 +496,15 @@ pub struct CallbackInstance {
     may_run_long: bool,
 }
 
+/// Operations a concrete pool exposes to its (non-generic) objects: submit one
+/// callback, and detach the object at free (objcount-- + pool-ref release). A
+/// `Pool<ThreadpoolObject, WineOs>` installs a `&'static PoolOps`, so the object
+/// reaches its pool without itself being generic over the pool's `Os`.
+pub struct PoolOps {
+    pub submit: unsafe fn(pool: *const c_void, obj: *mut ThreadpoolObject),
+    pub unbind: unsafe fn(pool: *const c_void),
+}
+
 /// Rust-native threadpool object (the C `struct threadpool_object`).
 pub struct ThreadpoolObject {
     sched: SchedState,
@@ -489,6 +521,10 @@ pub struct ThreadpoolObject {
     /// Set by [`tp_object_cancel`]; a worker skips a cancelled object's callback
     /// (still draining the pending count + releasing its reference).
     cancelled: AtomicBool,
+    /// Owning pool (C `object->pool`), type-erased; reached via [`pool_ops`] so the
+    /// object need not be generic over the pool's `Os`. Null for unbound objects.
+    pub(crate) pool: *const c_void,
+    pub(crate) pool_ops: *const PoolOps,
     /// Cleanup-group membership (C `object->group` / `is_group_member`); set at
     /// init via [`Group::add_member`](crate::cleanup_group::Group::add_member).
     pub(crate) group: *const crate::cleanup_group::Group,
@@ -529,11 +565,30 @@ impl ThreadpoolObject {
             refcount: AtomicI32::new(1), // base reference
             num_running: AtomicI32::new(0),
             cancelled: AtomicBool::new(false),
+            pool: core::ptr::null(),
+            pool_ops: core::ptr::null(),
             group: core::ptr::null(),
             is_group_member: AtomicBool::new(false),
             group_cancel_callback: None,
             signaled: AtomicI32::new(0),
             io: None,
+        }
+    }
+
+    pub(crate) fn set_pool(&mut self, pool: *const c_void, ops: *const PoolOps) {
+        self.pool = pool;
+        self.pool_ops = ops;
+    }
+    /// Submit this object to its pool (C `tp_object_submit`, used by TpPostWork).
+    pub(crate) fn submit_to_pool(&self) {
+        if !self.pool_ops.is_null() {
+            unsafe { ((*self.pool_ops).submit)(self.pool, self.as_ptr()) };
+        }
+    }
+    /// Detach from the pool (objcount-- + pool ref release), at object free.
+    fn unbind_from_pool(&self) {
+        if !self.pool_ops.is_null() {
+            unsafe { ((*self.pool_ops).unbind)(self.pool) };
         }
     }
 
@@ -644,6 +699,7 @@ pub fn tp_object_release(obj: *mut ThreadpoolObject) {
     let o = unsafe { &*obj };
     if o.refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
         crate::cleanup_group::unlink_member(obj);
+        o.unbind_from_pool(); // objcount-- + pool-ref release (may free the pool)
         drop(unsafe { Box::from_raw(obj) });
     }
 }
