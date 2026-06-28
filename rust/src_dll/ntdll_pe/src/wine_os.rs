@@ -178,8 +178,10 @@ impl WaitOs for WineOs {
             native[i] = handles[i] as Handle;
         }
         let timeout = -timeout_100ns; // relative
+        // Alertable, so a user APC queued to a WT_EXECUTEINIOTHREAD wait's thread
+        // runs here (returns STATUS_USER_APC -> None -> the service re-loops).
         let status =
-            unsafe { NtWaitForMultipleObjects(n as u32, native.as_ptr(), WAIT_ANY, 0, &timeout) };
+            unsafe { NtWaitForMultipleObjects(n as u32, native.as_ptr(), WAIT_ANY, 1, &timeout) };
         // STATUS_WAIT_0 == 0; a signaled handle returns its index in [0, n).
         if status >= 0 && (status as usize) < n {
             Some(status as usize)

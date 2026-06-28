@@ -617,6 +617,10 @@ pub struct ThreadpoolObject {
     /// TP_CALLBACK_ENVIRON.FinalizationCallback: run once after the main callback
     /// (C tp_object_execute), before the instance cleanup tasks.
     pub(crate) finalization_callback: Option<SimpleCallback>,
+    /// RtlRegisterWait WT_EXECUTEIN{IO,WAIT}THREAD: run the callback inline on the
+    /// (alertable) wait-bucket thread rather than handing it to a pool worker, so a
+    /// user APC queued to that thread runs and the callback's thread id is stable.
+    pub(crate) wait_run_inline: AtomicBool,
     /// I/O objects only: the pending/completion state (C `object->u.io`). `None`
     /// for every other object type, so non-I/O objects pay one word.
     pub(crate) io: Option<Box<crate::io_queue::IoState>>,
@@ -664,6 +668,7 @@ impl ThreadpoolObject {
             signaled: AtomicI32::new(0),
             rtl_wait_callback: None,
             finalization_callback: None,
+            wait_run_inline: AtomicBool::new(false),
             io: None,
         }
     }
@@ -674,6 +679,18 @@ impl ThreadpoolObject {
 
     pub(crate) fn set_finalization_callback(&mut self, cb: Option<SimpleCallback>) {
         self.finalization_callback = cb;
+    }
+    pub(crate) fn set_wait_run_inline(&self, inline: bool) {
+        self.wait_run_inline.store(inline, Ordering::Release);
+    }
+    pub(crate) fn wait_runs_inline(&self) -> bool {
+        self.wait_run_inline.load(Ordering::Acquire)
+    }
+    /// Account a callback as in-flight exactly as a pool submit does (refcount +
+    /// running + associated), for the inline WT_EXECUTEIN*THREAD dispatch path whose
+    /// matching dispatch_object then drops them.
+    pub(crate) fn account_submit(&self) {
+        self.on_submit();
     }
 
     pub(crate) fn set_pool(&mut self, pool: *const c_void, ops: *const PoolOps) {

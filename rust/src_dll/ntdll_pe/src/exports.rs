@@ -325,6 +325,7 @@ static WAIT_QUEUE: AtomicPtr<WineWaitQueue> = AtomicPtr::new(ptr::null_mut());
 
 const INFINITE: u32 = 0xFFFF_FFFF;
 const WT_EXECUTEINIOTHREAD: u32 = 0x0000_0001;
+const WT_EXECUTEINWAITTHREAD: u32 = 0x0000_0004;
 const WT_EXECUTEONLYONCE: u32 = 0x0000_0008;
 
 /// A signaled/timed-out wait is submitted to its pool (signaled bumps the count
@@ -334,7 +335,14 @@ fn wait_signaled(obj: *mut ThreadpoolObject, signaled: bool) {
         if signaled {
             (*obj).signaled.fetch_add(1, Ordering::AcqRel);
         }
-        (*obj).submit_to_pool();
+        if (*obj).wait_runs_inline() {
+            // WT_EXECUTEIN{IO,WAIT}THREAD: run the callback here, on the (alertable)
+            // wait-bucket thread, instead of a pool worker.
+            (*obj).account_submit();
+            dispatch_object(obj);
+        } else {
+            (*obj).submit_to_pool();
+        }
     }
 }
 
@@ -426,6 +434,8 @@ pub extern "system" fn RtlRegisterWait(
         let info = EnvInfo { pool: default_pool(), priority: PRIORITY_NORMAL, group: ptr::null(), cancel_cb: None, finalization: None };
         bind_object(obj, &info);
         let alertable = (flags & WT_EXECUTEINIOTHREAD) != 0;
+        // Run inline on the wait-bucket thread for the in-thread execution flags.
+        (*obj).set_wait_run_inline((flags & (WT_EXECUTEINIOTHREAD | WT_EXECUTEINWAITTHREAD)) != 0);
         (*wait_queue()).obj_added(obj, alertable);
         let to = if milliseconds == INFINITE { None } else { Some(-(milliseconds as i64 * 10_000)) };
         // Without WT_EXECUTEONLYONCE the wait re-fires on every signal.
