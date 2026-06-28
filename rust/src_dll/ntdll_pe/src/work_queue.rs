@@ -241,7 +241,11 @@ mod tests {
                             unsafe { free_node(recycled) };
                         }
                         None => {
-                            if done.load(Ordering::Acquire) && q.dequeue().is_none() {
+                            // Producers are joined before `done`, and values are
+                            // never re-enqueued, so an observed-empty queue under
+                            // `done` is final. (Never call dequeue() here just to
+                            // peek -- that would discard the item it returns.)
+                            if done.load(Ordering::Acquire) {
                                 break;
                             }
                             spin_loop();

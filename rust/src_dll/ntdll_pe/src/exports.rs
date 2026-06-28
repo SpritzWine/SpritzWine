@@ -9,9 +9,13 @@
 
 use crate::cleanup_group::Group;
 use crate::threadpool::{
-    dispatch_object, tp_object_cancel, tp_object_release, tp_object_wait, Pool, PoolOps,
-    SimpleCallback, ThreadpoolObject, WorkCallback,
+    dispatch_object, tp_object_cancel, tp_object_release, tp_object_wait, CallbackInstance, Pool,
+    PoolOps, RtlWaitOrTimerCallback, SimpleCallback, ThreadpoolObject, TimerCallback, TimerQueue,
+    WaitCallback, WorkCallback, WAIT_TIMEOUT,
 };
+use crate::io_queue::IoQueue;
+use crate::threadpool::IoCallback;
+use crate::wait_queue::{WaitOs, WaitQueue};
 use crate::wine_os::WineOs;
 use alloc::boxed::Box;
 use core::ffi::c_void;
@@ -182,7 +186,7 @@ pub extern "system" fn TpWaitForWork(work: *mut ThreadpoolObject, cancel_pending
     if cancel_pending != 0 {
         tp_object_cancel(work);
     }
-    tp_object_wait(work);
+    tp_object_wait(work, false);
 }
 
 // --- simple callbacks ---------------------------------------------------------
@@ -203,4 +207,376 @@ pub extern "system" fn TpSimpleTryPost(
         tp_object_release(obj);
     }
     STATUS_SUCCESS
+}
+
+// --- timers -------------------------------------------------------------------
+
+type WineTimerQueue = TimerQueue<WineOs>;
+static TIMER_QUEUE: AtomicPtr<WineTimerQueue> = AtomicPtr::new(ptr::null_mut());
+
+/// A fired timer is submitted to its pool (the C submit_expired_timers path).
+fn timer_expire(obj: *mut ThreadpoolObject) {
+    unsafe { (*obj).submit_to_pool() };
+}
+
+fn timer_queue() -> *mut WineTimerQueue {
+    let existing = TIMER_QUEUE.load(Ordering::Acquire);
+    if !existing.is_null() {
+        return existing;
+    }
+    let fresh = Box::into_raw(Box::new(TimerQueue::new(WineOs, timer_expire)));
+    match TIMER_QUEUE.compare_exchange(ptr::null_mut(), fresh, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => fresh,
+        Err(other) => {
+            drop(unsafe { Box::from_raw(fresh) });
+            other
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpAllocTimer(
+    out: *mut *mut ThreadpoolObject,
+    callback: TimerCallback,
+    userdata: *mut c_void,
+    environment: *const c_void,
+) -> i32 {
+    unsafe {
+        let info = parse_env(environment);
+        let obj = Box::into_raw(Box::new(ThreadpoolObject::new_timer(callback, userdata, info.priority)));
+        bind_object(obj, &info);
+        (*timer_queue()).obj_added();
+        *out = obj;
+    }
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpSetTimer(
+    timer: *mut ThreadpoolObject,
+    timeout: *const i64,
+    period: i32,
+    window_length: i32,
+) {
+    unsafe {
+        let to = if timeout.is_null() { None } else { Some(*timeout) };
+        (*timer).timer_set.store(!timeout.is_null(), Ordering::Release);
+        (*timer_queue()).set_timer(timer, to, period, window_length);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpIsTimerSet(timer: *mut ThreadpoolObject) -> u8 {
+    unsafe { (*timer).timer_set.load(Ordering::Acquire) as u8 }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpWaitForTimer(timer: *mut ThreadpoolObject, cancel_pending: u8) {
+    if cancel_pending != 0 {
+        tp_object_cancel(timer);
+    }
+    tp_object_wait(timer, false);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpReleaseTimer(timer: *mut ThreadpoolObject) {
+    unsafe {
+        (*timer_queue()).set_timer(timer, None, 0, 0); // disarm before free
+        (*timer_queue()).obj_removed();
+        tp_object_release(timer);
+    }
+}
+
+// --- waits --------------------------------------------------------------------
+
+type WineWaitQueue = WaitQueue<WineOs>;
+static WAIT_QUEUE: AtomicPtr<WineWaitQueue> = AtomicPtr::new(ptr::null_mut());
+
+const INFINITE: u32 = 0xFFFF_FFFF;
+const WT_EXECUTEINIOTHREAD: u32 = 0x0000_0001;
+
+/// A signaled/timed-out wait is submitted to its pool (signaled bumps the count
+/// so the dispatch yields WAIT_OBJECT_0).
+fn wait_signaled(obj: *mut ThreadpoolObject, signaled: bool) {
+    unsafe {
+        if signaled {
+            (*obj).signaled.fetch_add(1, Ordering::AcqRel);
+        }
+        (*obj).submit_to_pool();
+    }
+}
+
+fn wait_queue() -> *mut WineWaitQueue {
+    let existing = WAIT_QUEUE.load(Ordering::Acquire);
+    if !existing.is_null() {
+        return existing;
+    }
+    let fresh = Box::into_raw(Box::new(WaitQueue::new(WineOs, wait_signaled)));
+    match WAIT_QUEUE.compare_exchange(ptr::null_mut(), fresh, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => fresh,
+        Err(other) => {
+            drop(unsafe { Box::from_raw(fresh) });
+            other
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpAllocWait(
+    out: *mut *mut ThreadpoolObject,
+    callback: WaitCallback,
+    userdata: *mut c_void,
+    environment: *const c_void,
+) -> i32 {
+    unsafe {
+        let info = parse_env(environment);
+        let obj = Box::into_raw(Box::new(ThreadpoolObject::new_wait(callback, userdata, info.priority)));
+        bind_object(obj, &info);
+        (*wait_queue()).obj_added(obj, false);
+        *out = obj;
+    }
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpSetWait(wait: *mut ThreadpoolObject, handle: *mut c_void, timeout: *const i64) {
+    unsafe {
+        let to = if timeout.is_null() { None } else { Some(*timeout) };
+        (*wait_queue()).set_wait(wait, handle as u64, to);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpWaitForWait(wait: *mut ThreadpoolObject, cancel_pending: u8) {
+    if cancel_pending != 0 {
+        tp_object_cancel(wait);
+    }
+    tp_object_wait(wait, false);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpReleaseWait(wait: *mut ThreadpoolObject) {
+    unsafe {
+        (*wait_queue()).obj_removed(wait);
+        tp_object_release(wait);
+    }
+}
+
+// --- old RTL wait wrappers (built on the Tp* wait queue) ----------------------
+
+/// Bridges a Tp* wait callback to the RTL_WAITORTIMERCALLBACKFUNC (the C
+/// `rtl_wait_callback`): the 2nd arg is TRUE on timeout, FALSE on signal.
+extern "system" fn rtl_wait_bridge(
+    _inst: *mut CallbackInstance,
+    userdata: *mut c_void,
+    wait: *mut c_void,
+    result: u32,
+) {
+    let obj = wait as *const ThreadpoolObject;
+    if let Some(cb) = unsafe { (*obj).rtl_wait_callback } {
+        cb(userdata, (result == WAIT_TIMEOUT) as u8);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlRegisterWait(
+    out: *mut *mut ThreadpoolObject,
+    handle: *mut c_void,
+    callback: RtlWaitOrTimerCallback,
+    context: *mut c_void,
+    milliseconds: u32,
+    flags: u32,
+) -> i32 {
+    unsafe {
+        let obj = Box::into_raw(Box::new(ThreadpoolObject::new_wait(rtl_wait_bridge, context, PRIORITY_NORMAL)));
+        (*obj).set_rtl_wait_callback(callback);
+        let info = EnvInfo { pool: default_pool(), priority: PRIORITY_NORMAL, group: ptr::null(), cancel_cb: None };
+        bind_object(obj, &info);
+        let alertable = (flags & WT_EXECUTEINIOTHREAD) != 0;
+        (*wait_queue()).obj_added(obj, alertable);
+        let to = if milliseconds == INFINITE { None } else { Some(-(milliseconds as i64 * 10_000)) };
+        (*wait_queue()).set_wait(obj, handle as u64, to);
+        *out = obj;
+    }
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlDeregisterWaitEx(handle: *mut ThreadpoolObject, completion_event: *mut c_void) -> i32 {
+    unsafe {
+        (*wait_queue()).obj_removed(handle);
+        // NULL => wait synchronously; INVALID_HANDLE_VALUE (-1) => don't wait;
+        // else wait, then signal the caller's completion event.
+        let is_invalid = completion_event as usize == usize::MAX;
+        if !is_invalid {
+            tp_object_wait(handle, false);
+            if !completion_event.is_null() {
+                WineOs.set_event(completion_event as u64);
+            }
+        }
+        tp_object_release(handle);
+    }
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlDeregisterWait(handle: *mut ThreadpoolObject) -> i32 {
+    RtlDeregisterWaitEx(handle, ptr::null_mut())
+}
+
+// --- I/O completion -----------------------------------------------------------
+
+type WineIoQueue = IoQueue<WineOs>;
+static IO_QUEUE: AtomicPtr<WineIoQueue> = AtomicPtr::new(ptr::null_mut());
+
+fn io_submit(obj: *mut ThreadpoolObject) {
+    unsafe { (*obj).submit_to_pool() };
+}
+
+fn io_queue() -> *mut WineIoQueue {
+    let existing = IO_QUEUE.load(Ordering::Acquire);
+    if !existing.is_null() {
+        return existing;
+    }
+    let fresh = Box::into_raw(Box::new(IoQueue::new(WineOs, io_submit)));
+    match IO_QUEUE.compare_exchange(ptr::null_mut(), fresh, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => fresh,
+        Err(other) => {
+            drop(unsafe { Box::from_raw(fresh) });
+            other
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpAllocIoCompletion(
+    out: *mut *mut ThreadpoolObject,
+    file: *mut c_void,
+    callback: IoCallback,
+    userdata: *mut c_void,
+    environment: *const c_void,
+) -> i32 {
+    unsafe {
+        let info = parse_env(environment);
+        let obj = Box::into_raw(Box::new(ThreadpoolObject::new_io(callback, userdata, info.priority)));
+        bind_object(obj, &info);
+        (*io_queue()).obj_added(obj, file as u64);
+        *out = obj;
+    }
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpStartAsyncIoOperation(io: *mut ThreadpoolObject) {
+    unsafe { (*io).io_state().start_async() };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpCancelAsyncIoOperation(io: *mut ThreadpoolObject) {
+    unsafe { (*io).io_state().cancel_async() };
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpWaitForIoCompletion(io: *mut ThreadpoolObject, cancel_pending: u8) {
+    if cancel_pending != 0 {
+        tp_object_cancel(io);
+    }
+    tp_object_wait(io, false);
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpReleaseIoCompletion(io: *mut ThreadpoolObject) {
+    unsafe {
+        (*io_queue()).obj_removed();
+        tp_object_release(io);
+    }
+}
+
+// --- cleanup groups -----------------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpAllocCleanupGroup(out: *mut *mut Group) -> i32 {
+    unsafe { *out = Box::into_raw(Box::new(Group::new())) };
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpReleaseCleanupGroup(group: *mut Group) {
+    unsafe {
+        if (*group).release() {
+            drop(Box::from_raw(group));
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpReleaseCleanupGroupMembers(
+    group: *mut Group,
+    cancel_pending: u8,
+    userdata: *mut c_void,
+) {
+    unsafe { (*group).release_members(cancel_pending != 0, userdata) };
+}
+
+// --- callback instance API ----------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpCallbackMayRunLong(_instance: *mut CallbackInstance) -> i32 {
+    // The pool spawns workers on demand, so a long-running callback is always OK.
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpDisassociateCallback(instance: *mut CallbackInstance) {
+    unsafe { (*instance).disassociate() };
+}
+
+// --- pool stack information ---------------------------------------------------
+
+#[repr(C)]
+struct TpPoolStackInfo {
+    reserve: usize,
+    commit: usize,
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpSetPoolStackInformation(pool: *mut WinePool, info: *const c_void) -> i32 {
+    unsafe {
+        let si = &*(info as *const TpPoolStackInfo);
+        (*pool).set_stack_info(si.reserve, si.commit);
+    }
+    STATUS_SUCCESS
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn TpQueryPoolStackInformation(pool: *mut WinePool, info: *mut c_void) -> i32 {
+    unsafe {
+        let (reserve, commit) = (*pool).stack_info();
+        let si = &mut *(info as *mut TpPoolStackInfo);
+        si.reserve = reserve;
+        si.commit = commit;
+    }
+    STATUS_SUCCESS
+}
+
+// --- RtlQueueWorkItem (old RTL work API, over TpSimpleTryPost) -----------------
+
+struct RtlWorkItem {
+    function: extern "system" fn(*mut c_void),
+    context: *mut c_void,
+}
+
+extern "system" fn rtl_work_bridge(_inst: *mut CallbackInstance, userdata: *mut c_void) {
+    let item = unsafe { Box::from_raw(userdata as *mut RtlWorkItem) };
+    (item.function)(item.context); // item freed on drop
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn RtlQueueWorkItem(
+    function: extern "system" fn(*mut c_void),
+    context: *mut c_void,
+    _flags: u32,
+) -> i32 {
+    let item = Box::into_raw(Box::new(RtlWorkItem { function, context }));
+    TpSimpleTryPost(rtl_work_bridge, item as *mut c_void, ptr::null())
 }

@@ -81,7 +81,7 @@ impl Group {
         }
 
         for m in members {
-            tp_object_wait(m); // wait for in-flight callbacks
+            tp_object_wait(m, true); // wait for in-flight callbacks
             let o = unsafe { &*m };
             if cancel_pending {
                 if let Some(cb) = o.group_cancel_callback {

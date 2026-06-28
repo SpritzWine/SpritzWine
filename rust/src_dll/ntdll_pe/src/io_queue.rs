@@ -59,6 +59,16 @@ impl IoState {
         self.lock.unlock();
     }
 
+    /// Account an async op that will not complete (C `TpCancelAsyncIoOperation`).
+    pub fn cancel_async(&self) {
+        self.lock.lock();
+        let inner = unsafe { &mut *self.inner.get() };
+        if inner.pending_count > 0 {
+            inner.pending_count -= 1;
+        }
+        self.lock.unlock();
+    }
+
     /// A completion arrived: if an op was pending, consume one and queue the
     /// completion (caller then submits). Returns whether to submit.
     pub(crate) fn on_completion(&self, status: i32, information: usize, cvalue: usize) -> bool {

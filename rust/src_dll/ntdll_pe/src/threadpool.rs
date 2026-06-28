@@ -30,7 +30,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 /// Number of `TP_CALLBACK_PRIORITY` levels (high, normal, low) -- matches the C
 /// `pool->pools[3]` ordering.
@@ -260,6 +260,10 @@ pub struct Pool<T: Scheduled, Os: PoolOs> {
     /// reading it and sleeping cannot miss the wake.
     update: AtomicU32,
     worker_timeout_100ns: i64,
+    /// TP_POOL_STACK_INFORMATION (stored for TpQueryPoolStackInformation; worker
+    /// creation currently uses the default stack).
+    stack_reserve: AtomicUsize,
+    stack_commit: AtomicUsize,
     run: fn(*mut T),
     os: Os,
 }
@@ -296,9 +300,19 @@ impl<T: Scheduled, Os: PoolOs> Pool<T, Os> {
             shutdown: AtomicBool::new(false),
             update: AtomicU32::new(0),
             worker_timeout_100ns: WORKER_TIMEOUT_100NS,
+            stack_reserve: AtomicUsize::new(0),
+            stack_commit: AtomicUsize::new(0),
             run,
             os,
         }
+    }
+
+    pub fn set_stack_info(&self, reserve: usize, commit: usize) {
+        self.stack_reserve.store(reserve, Ordering::Release);
+        self.stack_commit.store(commit, Ordering::Release);
+    }
+    pub fn stack_info(&self) -> (usize, usize) {
+        (self.stack_reserve.load(Ordering::Acquire), self.stack_commit.load(Ordering::Acquire))
     }
 
     /// Take a pool reference (C `tp_threadpool_lock`'s refcount bump; each bound
@@ -460,6 +474,8 @@ pub type SimpleCallback = extern "system" fn(*mut CallbackInstance, *mut c_void)
 pub type TimerCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void);
 /// `CALLBACK`-ABI wait callback: `void(PTP_CALLBACK_INSTANCE, PVOID, PTP_WAIT, TP_WAIT_RESULT)`.
 pub type WaitCallback = extern "system" fn(*mut CallbackInstance, *mut c_void, *mut c_void, u32);
+/// RTL_WAITORTIMERCALLBACKFUNC: `void(PVOID context, BOOLEAN timer_or_wait_fired)`.
+pub type RtlWaitOrTimerCallback = extern "system" fn(*mut c_void, u8);
 /// `CALLBACK`-ABI I/O callback:
 /// `void(PTP_CALLBACK_INSTANCE, PVOID, PVOID overlapped, PIO_STATUS_BLOCK, PTP_IO)`.
 pub type IoCallback =
@@ -494,6 +510,20 @@ pub enum Callback {
 pub struct CallbackInstance {
     object: *mut ThreadpoolObject,
     may_run_long: bool,
+    /// Cleared by TpDisassociateCallback so a non-group wait stops waiting for
+    /// this callback (the C `instance.associated`).
+    associated: bool,
+}
+
+impl CallbackInstance {
+    /// TpDisassociateCallback: detach this callback from its object's non-group
+    /// wait. Idempotent.
+    pub fn disassociate(&mut self) {
+        if self.associated {
+            self.associated = false;
+            unsafe { &*self.object }.num_associated.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 /// Operations a concrete pool exposes to its (non-generic) objects: submit one
@@ -515,9 +545,12 @@ pub struct ThreadpoolObject {
     /// reference released by TpRelease*/cleanup-group), +1 per submitted callback,
     /// -1 after each runs; the allocation is freed at 0 ([`tp_object_release`]).
     refcount: AtomicI32,
-    /// Callbacks currently executing (C `num_running_callbacks`); with
-    /// [`SchedState::pending`] drives "finished" for [`tp_object_wait`].
+    /// Callbacks currently executing (C `num_running_callbacks`); a group wait
+    /// ([`tp_object_wait`] with `group=true`) drains on this.
     num_running: AtomicI32,
+    /// Like `num_running` but excluding callbacks that called TpDisassociateCallback
+    /// (C `num_associated_callbacks`); a non-group wait drains on this.
+    num_associated: AtomicI32,
     /// Set by [`tp_object_cancel`]; a worker skips a cancelled object's callback
     /// (still draining the pending count + releasing its reference).
     cancelled: AtomicBool,
@@ -532,10 +565,16 @@ pub struct ThreadpoolObject {
     /// Group cancel callback (C `group_cancel_callback`), run by
     /// TpReleaseCleanupGroupMembers on a cancel.
     pub(crate) group_cancel_callback: Option<extern "system" fn(*mut c_void, *mut c_void)>,
+    /// Timer objects: whether the last TpSetTimer armed it with a timeout (C
+    /// `object->u.timer.timer_set`); read by TpIsTimerSet, not cleared on fire.
+    pub(crate) timer_set: AtomicBool,
     /// Wait objects: count of signaled (vs timed-out) callbacks owed, set by the
     /// [`WaitQueue`](crate::wait_queue::WaitQueue) and consumed at dispatch to
     /// pick `WAIT_OBJECT_0` vs `WAIT_TIMEOUT` (C `object->u.wait.signaled`).
     pub(crate) signaled: AtomicI32,
+    /// RtlRegisterWait objects: the RTL callback the wait dispatch bridges to
+    /// (C `object->u.wait.rtl_callback`); `userdata` is its context.
+    pub(crate) rtl_wait_callback: Option<RtlWaitOrTimerCallback>,
     /// I/O objects only: the pending/completion state (C `object->u.io`). `None`
     /// for every other object type, so non-I/O objects pay one word.
     pub(crate) io: Option<Box<crate::io_queue::IoState>>,
@@ -564,15 +603,22 @@ impl ThreadpoolObject {
             may_run_long: false,
             refcount: AtomicI32::new(1), // base reference
             num_running: AtomicI32::new(0),
+            num_associated: AtomicI32::new(0),
             cancelled: AtomicBool::new(false),
             pool: core::ptr::null(),
             pool_ops: core::ptr::null(),
             group: core::ptr::null(),
             is_group_member: AtomicBool::new(false),
             group_cancel_callback: None,
+            timer_set: AtomicBool::new(false),
             signaled: AtomicI32::new(0),
+            rtl_wait_callback: None,
             io: None,
         }
+    }
+
+    pub(crate) fn set_rtl_wait_callback(&mut self, cb: RtlWaitOrTimerCallback) {
+        self.rtl_wait_callback = Some(cb);
     }
 
     pub(crate) fn set_pool(&mut self, pool: *const c_void, ops: *const PoolOps) {
@@ -646,11 +692,12 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     // SAFETY: live for the callback per the scheduler's contract (refcount).
     let o = unsafe { &*obj };
     o.num_running.fetch_add(1, Ordering::AcqRel);
+    o.num_associated.fetch_add(1, Ordering::AcqRel);
+    let mut instance = CallbackInstance { object: obj, may_run_long: o.may_run_long, associated: true };
 
     // A cancelled object still drains its pending count + reference, but its
     // callback is not run (C tp_object_cancel removed it from the queue).
     if !o.cancelled.load(Ordering::Acquire) {
-        let mut instance = CallbackInstance { object: obj, may_run_long: o.may_run_long };
         let inst = &mut instance as *mut CallbackInstance;
         match o.callback {
             Callback::Simple(cb) => cb(inst, o.userdata),
@@ -680,14 +727,24 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
     }
 
     o.num_running.fetch_sub(1, Ordering::AcqRel);
+    if instance.associated {
+        o.num_associated.fetch_sub(1, Ordering::AcqRel);
+    }
     // (later: finalization callback + instance cleanup tasks.)
     tp_object_release(obj);
 }
 
 /// True once no callbacks are queued or running for `obj` (C `object_is_finished`).
-fn object_is_finished(obj: *const ThreadpoolObject) -> bool {
+/// `group` waits on running callbacks; otherwise on associated ones (TpDisassociate-
+/// Callback drops a callback from the latter only).
+fn object_is_finished(obj: *const ThreadpoolObject, group: bool) -> bool {
     let o = unsafe { &*obj };
-    o.sched.pending() <= 0 && o.num_running.load(Ordering::Acquire) <= 0
+    let in_flight = if group {
+        o.num_running.load(Ordering::Acquire)
+    } else {
+        o.num_associated.load(Ordering::Acquire)
+    };
+    o.sched.pending() <= 0 && in_flight <= 0
 }
 
 /// Drop one reference; free the object (and unlink it from its cleanup group) when
@@ -717,8 +774,8 @@ pub fn tp_object_cancel(obj: *mut ThreadpoolObject) {
 ///
 /// # Safety
 /// The caller must hold a reference so `obj` stays alive across the wait.
-pub fn tp_object_wait(obj: *mut ThreadpoolObject) {
-    while !object_is_finished(obj) {
+pub fn tp_object_wait(obj: *mut ThreadpoolObject, group: bool) {
+    while !object_is_finished(obj, group) {
         core::hint::spin_loop();
     }
 }
