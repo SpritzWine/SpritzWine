@@ -22,10 +22,11 @@ members = [
 "src_programs/ping",
 "src_programs/dir",
 ]
-# PE-side staticlib: kept out of the workspace so its own `panic = "abort"`
-# profile is honored. Built explicitly (see build.sh), linked into ntdll.dll.so.
+# PE-side staticlibs: kept out of the workspace so their own `panic = "abort"`
+# profile is honored. Built explicitly (see build.sh), linked into the PE dlls.
 exclude = [
 "src_dll/ntdll_pe",
+"src_dll/avrt_pe",
 ]
 
 [workspace.lints.rust]

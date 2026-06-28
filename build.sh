@@ -58,30 +58,39 @@ cargo build --release -p wine_ntdll
 # portal); linked into comdlg32.so in step 4, so it must exist first.
 cargo build --release -p wine_comdlg32
 
-# The PE-side static lib (no_std, panic=abort) is excluded from the workspace so its
-# own profile is honored; it links into ntdll's PE image (ntdll.dll) in step 4. Under
-# new-WoW64 it must be REAL PE -- one build per arch in PE_ARCHS, for the matching
-# clang/lld PE target (*-pc-windows-gnullvm).
+# The PE-side static libs (no_std, panic=abort) are excluded from the workspace so
+# their own profile is honored; they link into the PE images (ntdll.dll, avrt.dll) in
+# step 4. Under new-WoW64 they must be REAL PE -- one build per arch in PE_ARCHS, for
+# the matching clang/lld PE target (*-pc-windows-gnullvm).
+#   ntdll_pe -> ntdll.dll  (threadpool, unwind, ...)
+#   avrt_pe  -> avrt.dll   (MMCSS: AvSetMmThreadCharacteristics & friends)
 for pe_target in i686-pc-windows-gnullvm x86_64-pc-windows-gnullvm; do
-    cargo build --release --manifest-path src_dll/ntdll_pe/Cargo.toml \
-        --target-dir target --target "$pe_target"
+    for pe_crate in ntdll_pe avrt_pe; do
+        cargo build --release --manifest-path "src_dll/$pe_crate/Cargo.toml" \
+            --target-dir target --target "$pe_target"
+    done
 done
 
 echo "==> [4/6] Building Wine's dlls and headers (generates headers; links libwine_ntdll into ntdll)"
 cd "$ROOT/wine"
 make -j"$JOBS" -C include
-# The PE Rust staticlib is linked into ntdll via EXTRADLLFLAGS, which makedep does
-# NOT track as an ntdll.dll prerequisite. Drop a stale ntdll.dll when its staticlib
-# is newer, so `make dlls` relinks instead of silently keeping the old code (the
-# same gotcha relink-ntdll.sh handles for the quick dev loop).
+# Each PE Rust staticlib is linked into its dll via EXTRADLLFLAGS, which makedep does
+# NOT track as a dll prerequisite. Drop a stale dll when its staticlib is newer, so
+# `make dlls` relinks instead of silently keeping the old code (the same gotcha
+# relink-ntdll.sh handles for the quick dev loop).
+#   libwine_ntdll_pe.a -> dlls/ntdll/<arch>-windows/ntdll.dll
+#   libwine_avrt_pe.a  -> dlls/avrt/<arch>-windows/avrt.dll
 for arch in i386 x86_64; do
     pe=i686; [ "$arch" = x86_64 ] && pe=x86_64
-    lib="$ROOT/rust/target/$pe-pc-windows-gnullvm/release/libwine_ntdll_pe.a"
-    dll="dlls/ntdll/$arch-windows/ntdll.dll"
-    if [ -f "$lib" ] && [ -f "$dll" ] && [ "$lib" -nt "$dll" ]; then
-        echo "    PE staticlib ($pe) newer than $dll -> forcing relink"
-        rm -f "$dll"
-    fi
+    for pe_pair in "ntdll_pe:ntdll/$arch-windows/ntdll.dll" "avrt_pe:avrt/$arch-windows/avrt.dll"; do
+        crate=${pe_pair%%:*}; dllpath=${pe_pair#*:}
+        lib="$ROOT/rust/target/$pe-pc-windows-gnullvm/release/libwine_$crate.a"
+        dll="dlls/$dllpath"
+        if [ -f "$lib" ] && [ -f "$dll" ] && [ "$lib" -nt "$dll" ]; then
+            echo "    PE staticlib ($pe libwine_$crate.a) newer than $dll -> forcing relink"
+            rm -f "$dll"
+        fi
+    done
 done
 make -j"$JOBS" dlls
 
