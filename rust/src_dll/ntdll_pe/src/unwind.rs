@@ -59,6 +59,9 @@ pub const UNWIND_REJECT_OOB_READ: u32 = 1;
 pub const UNWIND_REJECT_MALFORMED: u32 = 2;
 /// An unknown UWOP opcode or unsupported UNWIND_INFO version.
 pub const UNWIND_REJECT_UNKNOWN_OPCODE: u32 = 3;
+/// A SEH SCOPE_TABLE entry (count or a filter/__finally/jump RVA) pointed
+/// outside the module image -- `__C_specific_handler` would call a wild pointer.
+pub const UNWIND_REJECT_BAD_SCOPE: u32 = 4;
 
 /// Diagnostic written by the unwinder on an aborted frame. `#[repr(C)]` so the
 /// C `RtlVirtualUnwind2` can read it back (mirrored as `struct unwind_reject`
@@ -524,6 +527,70 @@ pub extern "C" fn rs_rtl_interpret_epilog(
     }
 }
 
+/// Validate an x86_64 SEH `SCOPE_TABLE` before `__C_specific_handler` dispatches
+/// it. The table is `dispatch->HandlerData`: a `u32 Count` followed by `Count`
+/// 16-byte `SCOPE_RECORD`s `{ BeginAddress, EndAddress, HandlerAddress,
+/// JumpTarget }` (all module RVAs). The handler calls `base + HandlerAddress`
+/// and unwinds to `base + JumpTarget`, so a corrupt/foreign table (e.g. a
+/// VMProtect module) could make it call or jump to a wild address. This checks
+/// the whole table lies in `[base, base+image_size)` and every RVA is `<=
+/// image_size` -- one call, then the C loop can trust it.
+///
+/// Returns `STATUS_SUCCESS`, or `STATUS_BAD_FUNCTION_TABLE` (filling `reject`
+/// with the offending absolute address + record index) so the caller skips the
+/// handler instead of calling into garbage.
+///
+/// # Safety
+/// `table`/`table_addr` describe the same readable SCOPE_TABLE; `reject` is
+/// valid or NULL. The 4-byte `Count` read is bounds-checked against the image
+/// before any record is touched.
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_seh_validate_scope_table(
+    table: *const u8,
+    table_addr: u64,
+    base: u64,
+    image_size: u64,
+    reject: *mut UnwindReject,
+) -> i32 {
+    // The scope table normally lives in the module's .xdata. If HandlerData
+    // points outside the image -- a stack-built table (ntdll's own exception
+    // tests do this) or unusual dynamic dispatch -- we can't bound it against
+    // the image, so SKIP validation (best-effort, like the unwinder with NULL
+    // limits) rather than decline a legitimate handler. The real threat (a
+    // corrupt in-module VMProtect .xdata) is still fully checked below.
+    if table_addr < base || table_addr.wrapping_add(4) > base.wrapping_add(image_size) {
+        return STATUS_SUCCESS;
+    }
+    // SAFETY: the 4-byte Count is within the (mapped) image per the check above.
+    let count = unsafe { (table as *const u32).read_unaligned() };
+
+    // The whole table (Count + Count*16) must fit in the image, else `count` is
+    // garbage and walking the records would read out of bounds.
+    let off = table_addr - base;
+    let table_bytes = 4u64 + (count as u64) * 16;
+    if off + table_bytes > image_size {
+        return bail(reject, UNWIND_REJECT_BAD_SCOPE, table_addr, count);
+    }
+
+    // Every record's RVAs must point inside the image.
+    // SAFETY: the record array is within the image per the size check above.
+    let records = unsafe { table.add(4) as *const u32 };
+    for i in 0..count as usize {
+        let fields = [
+            unsafe { records.add(i * 4).read_unaligned() },     // BeginAddress
+            unsafe { records.add(i * 4 + 1).read_unaligned() }, // EndAddress
+            unsafe { records.add(i * 4 + 2).read_unaligned() }, // HandlerAddress (called)
+            unsafe { records.add(i * 4 + 3).read_unaligned() }, // JumpTarget (unwound to)
+        ];
+        for &rva in &fields {
+            if rva as u64 > image_size {
+                return bail(reject, UNWIND_REJECT_BAD_SCOPE, base + rva as u64, i as u32);
+            }
+        }
+    }
+    STATUS_SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,5 +811,73 @@ mod tests {
         assert_eq!(status, STATUS_BAD_FUNCTION_TABLE);
         assert_eq!(reject.reason, UNWIND_REJECT_OOB_READ);
         assert_eq!(regs[5], 0); // rbp untouched
+    }
+
+    /// Build a SCOPE_TABLE buffer: u32 Count, then 16-byte records.
+    fn scope_table(records: &[[u32; 4]]) -> alloc::vec::Vec<u8> {
+        let mut v = alloc::vec::Vec::new();
+        v.extend_from_slice(&(records.len() as u32).to_le_bytes());
+        for r in records {
+            for f in r {
+                v.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        v
+    }
+
+    fn validate(buf: &[u8], table_addr: u64, base: u64, image_size: u64) -> (i32, UnwindReject) {
+        let mut reject = UnwindReject { addr: 0, reason: UNWIND_REJECT_NONE, opcode_index: 0 };
+        let status =
+            rs_seh_validate_scope_table(buf.as_ptr(), table_addr, base, image_size, &mut reject);
+        (status, reject)
+    }
+
+    #[test]
+    fn scope_table_valid_passes() {
+        let base = 0x1_4000_0000u64;
+        let img = 0x10000u64;
+        // begin/end/handler/jump all in-image.
+        let buf = scope_table(&[[0x1000, 0x1100, 0x1200, 0], [0x2000, 0x2100, 1, 0x2080]]);
+        let (status, _) = validate(&buf, base + 0x8000, base, img);
+        assert_eq!(status, STATUS_SUCCESS);
+    }
+
+    #[test]
+    fn scope_table_wild_handler_rejected() {
+        let base = 0x1_4000_0000u64;
+        let img = 0x10000u64;
+        // record 0 ok; record 1 has a HandlerAddress way past the image (VMProtect-style).
+        let buf = scope_table(&[[0x1000, 0x1100, 0x1200, 0], [0x2000, 0x2100, 0xDEAD_BEEF, 0]]);
+        let (status, reject) = validate(&buf, base + 0x8000, base, img);
+        assert_eq!(status, STATUS_BAD_FUNCTION_TABLE);
+        assert_eq!(reject.reason, UNWIND_REJECT_BAD_SCOPE);
+        assert_eq!(reject.addr, base + 0xDEAD_BEEF); // the would-be call target
+        assert_eq!(reject.opcode_index, 1); // offending record index
+    }
+
+    #[test]
+    fn scope_table_garbage_count_rejected_before_walk() {
+        let base = 0x1_4000_0000u64;
+        let img = 0x10000u64;
+        // a huge Count that can't fit in the image -> rejected before reading any record.
+        let mut buf = alloc::vec::Vec::new();
+        buf.extend_from_slice(&0x00FF_FFFFu32.to_le_bytes()); // absurd Count, no records follow
+        let (status, reject) = validate(&buf, base + 0x8000, base, img);
+        assert_eq!(status, STATUS_BAD_FUNCTION_TABLE);
+        assert_eq!(reject.reason, UNWIND_REJECT_BAD_SCOPE);
+    }
+
+    #[test]
+    fn scope_table_outside_image_is_skipped() {
+        // A stack-built table (HandlerData outside the module image) must be
+        // SKIPPED, not rejected -- declining it would break legitimate handlers
+        // (ntdll's own exception tests build scope tables on the stack).
+        let base = 0x1_4000_0000u64;
+        let img = 0x10000u64;
+        let buf = scope_table(&[[0x1000, 0x1100, 0x1200, 0]]);
+        // table_addr far below the image base (a "stack" address).
+        let (status, reject) = validate(&buf, 0x7fff_0000_0000u64, base, img);
+        assert_eq!(status, STATUS_SUCCESS);
+        assert_eq!(reject.reason, UNWIND_REJECT_NONE);
     }
 }
