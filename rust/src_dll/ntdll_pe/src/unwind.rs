@@ -62,6 +62,12 @@ pub const UNWIND_REJECT_UNKNOWN_OPCODE: u32 = 3;
 /// A SEH SCOPE_TABLE entry (count or a filter/__finally/jump RVA) pointed
 /// outside the module image -- `__C_specific_handler` would call a wild pointer.
 pub const UNWIND_REJECT_BAD_SCOPE: u32 = 4;
+/// The i386 SEH registration chain isn't strictly increasing (a cycle or a
+/// backward Prev pointer) -- `call_seh_handlers` would otherwise spin forever.
+pub const UNWIND_REJECT_SEH_CYCLE: u32 = 5;
+/// An i386 SEH frame's Handler points into the thread stack -- the classic SEH
+/// overwrite; calling it would execute attacker-controlled stack data.
+pub const UNWIND_REJECT_SEH_HANDLER_ON_STACK: u32 = 6;
 
 /// Diagnostic written by the unwinder on an aborted frame. `#[repr(C)]` so the
 /// C `RtlVirtualUnwind2` can read it back (mirrored as `struct unwind_reject`
@@ -591,6 +597,43 @@ pub extern "C" fn rs_seh_validate_scope_table(
     STATUS_SUCCESS
 }
 
+/// Validate one i386 SEH registration frame as `call_seh_handlers` walks the
+/// `FS:[0]` chain, *after* the caller has confirmed the frame address itself is
+/// aligned and in-stack (wine's `is_valid_frame`). Catches the two corruptions
+/// that check misses, with a diagnostic so a real 32-bit SEH-overwrite/cycle is
+/// visible instead of a silent hang or a jump into stack data:
+///
+/// * **cycle / backward chain** -- the chain runs from the most-recent handler
+///   (lowest stack address) outward, so each `Prev` must be a strictly higher
+///   address than the frame we came from; otherwise the C loop spins forever.
+/// * **handler on the stack** -- a legitimate handler lives in a code module;
+///   one pointing into `[stack_low, stack_high]` is an SEH overwrite.
+///
+/// All values are passed by value (no dereference), so the C caller reads
+/// `frame->Handler` only after `is_valid_frame`. Returns `STATUS_SUCCESS` or
+/// `STATUS_BAD_FUNCTION_TABLE` (filling `reject`).
+///
+/// # Safety: `reject` is valid or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rs_seh_i386_chain_check(
+    frame: u32,
+    prev_frame: u32,
+    handler: u32,
+    stack_low: u32,
+    stack_high: u32,
+    reject: *mut UnwindReject,
+) -> i32 {
+    // The chain must move strictly toward the stack base (higher addresses).
+    if frame <= prev_frame {
+        return bail(reject, UNWIND_REJECT_SEH_CYCLE, frame as u64, u32::MAX);
+    }
+    // The handler must not live on the stack.
+    if handler >= stack_low && handler <= stack_high {
+        return bail(reject, UNWIND_REJECT_SEH_HANDLER_ON_STACK, handler as u64, u32::MAX);
+    }
+    STATUS_SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,5 +922,36 @@ mod tests {
         let (status, reject) = validate(&buf, 0x7fff_0000_0000u64, base, img);
         assert_eq!(status, STATUS_SUCCESS);
         assert_eq!(reject.reason, UNWIND_REJECT_NONE);
+    }
+
+    fn chain_check(frame: u32, prev: u32, handler: u32, lo: u32, hi: u32) -> (i32, UnwindReject) {
+        let mut reject = UnwindReject { addr: 0, reason: UNWIND_REJECT_NONE, opcode_index: 0 };
+        let status = rs_seh_i386_chain_check(frame, prev, handler, lo, hi, &mut reject);
+        (status, reject)
+    }
+
+    #[test]
+    fn seh_i386_valid_frame_passes() {
+        // frame above prev, handler in a code module (outside the stack window).
+        let (status, _) = chain_check(0x0019_f000, 0x0019_e000, 0x0040_1000, 0x0019_0000, 0x001a_0000);
+        assert_eq!(status, STATUS_SUCCESS);
+    }
+
+    #[test]
+    fn seh_i386_cycle_rejected() {
+        // frame <= prev (a backward/looping chain) -> would spin call_seh_handlers.
+        let (status, reject) = chain_check(0x0019_e000, 0x0019_f000, 0x0040_1000, 0x0019_0000, 0x001a_0000);
+        assert_eq!(status, STATUS_BAD_FUNCTION_TABLE);
+        assert_eq!(reject.reason, UNWIND_REJECT_SEH_CYCLE);
+        assert_eq!(reject.addr, 0x0019_e000);
+    }
+
+    #[test]
+    fn seh_i386_handler_on_stack_rejected() {
+        // handler points into the stack window -> SEH overwrite.
+        let (status, reject) = chain_check(0x0019_f000, 0x0019_e000, 0x0019_f400, 0x0019_0000, 0x001a_0000);
+        assert_eq!(status, STATUS_BAD_FUNCTION_TABLE);
+        assert_eq!(reject.reason, UNWIND_REJECT_SEH_HANDLER_ON_STACK);
+        assert_eq!(reject.addr, 0x0019_f400);
     }
 }
