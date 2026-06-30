@@ -23,10 +23,13 @@ members = [
 "src_programs/dir",
 ]
 # PE-side staticlibs: kept out of the workspace so their own `panic = "abort"`
-# profile is honored. Built explicitly (see build.sh), linked into the PE dlls.
+# profile is honored. Built explicitly (see build.sh), linked into the PE modules.
+# src_dll/*_pe -> user DLLs (process-heap backed); src_sys/*_pe -> kernel drivers
+# (.sys, kernel-pool backed).
 exclude = [
 "src_dll/ntdll_pe",
 "src_dll/avrt_pe",
+"src_sys/hidparse_pe",
 ]
 
 [workspace.lints.rust]

@@ -1,0 +1,36 @@
+[package]
+name = "wine_hidparse_pe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# PE-side Rust for hidparse.sys (the HID report-descriptor parser). Like the
+# sibling `wine_ntdll_pe` / `wine_avrt_pe` staticlibs, this links directly into
+# Wine's PE `hidparse.sys` (winegcc -nodefaultlibs path via EXTRADLLFLAGS). It is
+# a freestanding `no_std` static library: `parse_descriptor` walks an untrusted,
+# device-supplied byte stream, so moving it to Rust replaces hand-rolled C pointer
+# arithmetic (an off-by-one / loop-overshoot OOB read on malformed descriptors)
+# with bounds-checked slicing. Transient parser state uses the `alloc` crate over
+# a global allocator that forwards to the C runtime hidparse.sys already links
+# (malloc/realloc/free); the returned preparsed buffer is allocated with
+# ExAllocatePool so the existing C callers free it unchanged.
+[lib]
+name = "wine_hidparse_pe"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+# The PE link environment has no unwinder; abort on panic so no eh_personality /
+# _Unwind_Resume machinery is required. (Excluded from the workspace so this
+# profile is honored rather than ignored -- see ../../Cargo.toml `exclude`.)
+#
+# codegen-units = 1 makes the crate one object, so the PE link pulls every entry
+# point by forcing the single anchor symbol (-Wl,-u / /include:) -- mirrors ntdll_pe.
+[profile.release]
+panic = "abort"
+opt-level = "z"
+codegen-units = 1
+lto = true
+strip = true
+
+[profile.dev]
+panic = "abort"

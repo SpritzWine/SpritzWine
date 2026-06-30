@@ -59,14 +59,15 @@ cargo build --release -p wine_ntdll
 cargo build --release -p wine_comdlg32
 
 # The PE-side static libs (no_std, panic=abort) are excluded from the workspace so
-# their own profile is honored; each links into its dll's PE image in step 4. Under
+# their own profile is honored; each links into its module's PE image in step 4. Under
 # new-WoW64 they must be REAL PE -- one build per arch in PE_ARCHS, for the matching
 # clang/lld PE target (*-pc-windows-gnullvm). Auto-discovered by the uniform naming:
-# every rust/src_dll/<dll>_pe builds libwine_<dll>_pe.a, linked into dlls/<dll> (e.g.
-# ntdll_pe -> ntdll.dll, avrt_pe -> avrt.dll). Add a converted module by creating the
-# crate -- no edit here.
+# every <name>_pe crate builds libwine_<name>_pe.a, linked into dlls/<name>. Two trees
+# by module kind: src_dll/*_pe -> user DLLs (e.g. ntdll_pe -> ntdll.dll, process-heap
+# backed); src_sys/*_pe -> kernel drivers (e.g. hidparse_pe -> hidparse.sys, kernel-pool
+# backed). Add a converted module by creating the crate in the right tree -- no edit here.
 for pe_target in i686-pc-windows-gnullvm x86_64-pc-windows-gnullvm; do
-    for pe_manifest in src_dll/*_pe/Cargo.toml; do
+    for pe_manifest in src_dll/*_pe/Cargo.toml src_sys/*_pe/Cargo.toml; do
         cargo build --release --manifest-path "$pe_manifest" \
             --target-dir target --target "$pe_target"
     done
@@ -75,19 +76,34 @@ done
 echo "==> [4/6] Building Wine's dlls and headers (generates headers; links libwine_ntdll into ntdll)"
 cd "$ROOT/wine"
 make -j"$JOBS" -C include
-# Each PE Rust staticlib is linked into its dll via EXTRADLLFLAGS, which makedep does
-# NOT track as a dll prerequisite. Drop a stale dll when its staticlib is newer, so
-# `make dlls` relinks instead of silently keeping the old code (the same gotcha
-# relink-ntdll.sh handles for the quick dev loop). Auto-discovered from the crate set:
-# rust/src_dll/<dll>_pe -> libwine_<dll>_pe.a -> dlls/<dll>/<arch>-windows/<dll>.dll.
+# Each PE Rust staticlib is linked into its module via EXTRADLLFLAGS, which makedep
+# does NOT track as a prerequisite. Drop a stale PE image when its staticlib is newer,
+# so `make dlls` relinks instead of silently keeping the old code (the same gotcha
+# relink-ntdll.sh handles for the quick dev loop). The crate <name>_pe (from either
+# tree) maps to a Wine module by name alone: a user DLL lives in dlls/<name>/ and
+# builds <name>.dll, while a driver/exe lives in dlls/<name>.<ext>/ and builds
+# <name>.<ext>. Resolving that by filesystem lookup keeps this kind-agnostic, so a
+# future .sys/.exe/.drv crate needs no edit here.
 for arch in i386 x86_64; do
     pe=i686; [ "$arch" = x86_64 ] && pe=x86_64
-    for pe_dir in "$ROOT"/rust/src_dll/*_pe; do
-        dll=$(basename "$pe_dir" _pe)
-        lib="$ROOT/rust/target/$pe-pc-windows-gnullvm/release/libwine_${dll}_pe.a"
-        out="dlls/$dll/$arch-windows/$dll.dll"
-        if [ -f "$lib" ] && [ -f "$out" ] && [ "$lib" -nt "$out" ]; then
-            echo "    PE staticlib ($pe libwine_${dll}_pe.a) newer than $out -> forcing relink"
+    for pe_dir in "$ROOT"/rust/src_dll/*_pe "$ROOT"/rust/src_sys/*_pe; do
+        [ -d "$pe_dir" ] || continue
+        name=$(basename "$pe_dir" _pe)
+        lib="$ROOT/rust/target/$pe-pc-windows-gnullvm/release/libwine_${name}_pe.a"
+        [ -f "$lib" ] || continue
+        # dlls/<name> is a plain DLL (module file <name>.dll); otherwise the module
+        # dir carries the extension (dlls/<name>.sys, dlls/<name>.exe, ...) and the
+        # PE file is named exactly after that dir.
+        if [ -d "dlls/$name" ]; then
+            out="dlls/$name/$arch-windows/$name.dll"
+        else
+            moddir=""
+            for d in "dlls/$name".*; do [ -d "$d" ] && { moddir=${d#dlls/}; break; }; done
+            [ -n "$moddir" ] || continue
+            out="dlls/$moddir/$arch-windows/$moddir"
+        fi
+        if [ -f "$out" ] && [ "$lib" -nt "$out" ]; then
+            echo "    PE staticlib ($pe libwine_${name}_pe.a) newer than $out -> forcing relink"
             rm -f "$out"
         fi
     done
