@@ -57,6 +57,9 @@ cargo build --release -p wine_ntdll
 # Portal client for comdlg32's unix side (host file chooser via XDG desktop
 # portal); linked into comdlg32.so in step 4, so it must exist first.
 cargo build --release -p wine_comdlg32
+# Sony gamepad rumble core for winebus.sys's unix side (hidraw DualShock 4 /
+# DualSense force feedback); linked into winebus.so in step 4.
+cargo build --release -p wine_winebus
 
 # The PE-side static libs (no_std, panic=abort) are excluded from the workspace so
 # their own profile is honored; each links into its module's PE image in step 4. Under
@@ -127,7 +130,7 @@ cat <<EOF
 
 ✅ Build complete (new-WoW64: 64-bit host, runs 32- and 64-bit Windows apps).
    Wine loader : $ROOT/wine/wine
-   Rust libs   : $ROOT/rust/target/x86_64-unknown-linux-gnu/release/deps/  (unix: libwine_ntdll.so, libwine_comdlg32.so)
+   Rust libs   : $ROOT/rust/target/x86_64-unknown-linux-gnu/release/deps/  (unix: libwine_ntdll.so, libwine_comdlg32.so, libwine_winebus.so)
                  $ROOT/rust/target/{i686,x86_64}-pc-windows-gnullvm/release/  (PE: libwine_ntdll_pe.a)
 
 Try it:  $ROOT/wine/wine --version

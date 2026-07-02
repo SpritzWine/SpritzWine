@@ -1,0 +1,15 @@
+[package]
+name = "wine_winebus"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Sony gamepad (DualShock 4 / DualSense) rumble core for winebus.sys's Unix
+# side. Linked into winebus.so via UNIX_LIBS (see dlls/winebus.sys/Makefile.in,
+# `$(WINE_RUST_LDFLAGS) -Wl,-lwine_winebus`). Like wine_ntdll/wine_comdlg32 it
+# has NO dependency on the other Wine dlls, so libwine_winebus.so builds
+# standalone *before* Wine and links in without a build/link cycle.
+[lib]
+name = "wine_winebus"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
