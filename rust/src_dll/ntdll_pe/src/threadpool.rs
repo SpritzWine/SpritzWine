@@ -566,7 +566,18 @@ pub struct PoolOps {
 }
 
 /// Rust-native threadpool object (the C `struct threadpool_object`).
+///
+/// `#[repr(C)]` with `win32_callback` first is load-bearing: kernelbase's
+/// `CreateThreadpoolIo` stashes the win32 I/O callback at `*(void **)io` -- the
+/// first pointer of the TP_IO handle -- and its `tp_io_callback` reads it back from
+/// there. Wine's `struct threadpool_object` reserves this leading slot for exactly
+/// that; we must too, or kernelbase clobbers our scheduler state and calls garbage.
+#[repr(C)]
 pub struct ThreadpoolObject {
+    /// Reserved leading slot for kernelbase to stash the win32 I/O callback (C
+    /// `object->win32_callback`). ntdll never reads it; the object owns no meaning
+    /// here beyond keeping offset 0 writable for kernelbase.
+    win32_callback: *mut c_void,
     sched: SchedState,
     callback: Callback,
     userdata: *mut c_void,
@@ -649,6 +660,7 @@ unsafe impl Sync for ThreadpoolObject {}
 impl ThreadpoolObject {
     fn with_callback(callback: Callback, userdata: *mut c_void, priority: u8) -> Self {
         ThreadpoolObject {
+            win32_callback: core::ptr::null_mut(),
             sched: SchedState::new(priority),
             callback,
             userdata,
@@ -876,6 +888,15 @@ pub fn dispatch_object(obj: *mut ThreadpoolObject) {
 /// Callback drops a callback from the latter only).
 fn object_is_finished(obj: *const ThreadpoolObject, group: bool) -> bool {
     let o = unsafe { &*obj };
+    // An I/O object is not finished while it still owes a callback -- an async op is
+    // pending, or a completion is queued but not yet dispatched. This is what makes
+    // TpWaitForIoCompletion(.,FALSE) block (C object_is_finished checks
+    // u.io.pending_count; is_busy also covers the submit-accounting gap).
+    if let Some(io) = o.io.as_ref() {
+        if io.is_busy() {
+            return false;
+        }
+    }
     // num_running/num_associated are bumped at submit (on_submit), so they already
     // cover queued-but-not-yet-dispatched callbacks. Discount cancel_pending: a
     // cancelled submission will be skipped (not run), so a wait must not block on it
@@ -912,6 +933,12 @@ pub fn tp_object_cancel(obj: *mut ThreadpoolObject) {
     // and, for a wait, u.wait.signaled). Already-running callbacks and an armed-but-
     // unfired wait are untouched -- the wait re-fires normally after this.
     o.signaled.store(0, Ordering::Release);
+    // I/O: pending async ops become "skipped" -- their completions still arrive at
+    // the port and must be drained before the object can be destroyed. This also
+    // makes object_is_finished true so TpWaitForIoCompletion(.,TRUE) returns.
+    if let Some(io) = o.io.as_ref() {
+        io.cancel_to_skipped();
+    }
     let queued = o.sched.pending();
     if queued > 0 {
         // Only MARK these queued callbacks cancellable; each one's own (skipped)

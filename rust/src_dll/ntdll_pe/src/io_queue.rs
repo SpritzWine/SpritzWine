@@ -11,12 +11,16 @@
 //! `u.io`), guarded by its own small lock, since both the I/O thread (push) and a
 //! pool worker (pop, at dispatch) touch it.
 //!
-//! Scope: the core post -> submit -> dispatch path. Deferred (faithful but not
-//! yet ported): the skipped/destroy shutdown bookkeeping for in-flight ops and
-//! TpWaitForIoCompletion's cancel semantics (come with tp_object_cancel/wait in
-//! the wine wiring).
+//! Scope: the full post -> submit -> dispatch path plus the shutdown/skip/destroy
+//! bookkeeping (the "expected completions" model, C `bdba5ba5f65`): async ops are
+//! counted as `pending_count`; a cancel via TpWaitForIoCompletion(.,TRUE) moves
+//! them to `skipped_count` (their completions still arrive at the port and must be
+//! drained); TpReleaseIoCompletion sets `shutting_down` and only destroys the
+//! object once no completions are outstanding, otherwise the I/O thread destroys it
+//! when the last skipped completion drains. This is what keeps a completion from
+//! being delivered to a freed object.
 
-use crate::threadpool::{PoolOs, ThreadpoolObject};
+use crate::threadpool::{tp_object_release, PoolOs, ThreadpoolObject};
 use crate::work_queue::SpinLock;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
@@ -29,8 +33,26 @@ struct Completion {
     cvalue: usize,
 }
 
+/// What the I/O service thread must do with a completion it just dequeued.
+#[derive(PartialEq, Eq, Debug)]
+pub(crate) enum IoAction {
+    /// Queue the completion + submit the object to the pool (fire the callback).
+    Submit,
+    /// The object is shutting down and this was its last outstanding completion:
+    /// account it out of the queue and release the object.
+    Destroy,
+    /// Drop the completion (cancelled op, or a skipped one still draining).
+    Ignore,
+}
+
 struct IoInner {
+    /// Async ops started (C `TpStartAsyncIoOperation`) but not yet completed.
     pending_count: i32,
+    /// Ops cancelled while pending (C `tp_object_cancel`): their completions still
+    /// arrive at the port during shutdown and must be drained before destroying.
+    skipped_count: i32,
+    /// TpReleaseIoCompletion has been called (C `u.io.shutting_down`).
+    shutting_down: bool,
     completions: Vec<Completion>,
 }
 
@@ -48,7 +70,12 @@ impl IoState {
     pub fn new() -> Self {
         IoState {
             lock: SpinLock::new(),
-            inner: UnsafeCell::new(IoInner { pending_count: 0, completions: Vec::new() }),
+            inner: UnsafeCell::new(IoInner {
+                pending_count: 0,
+                skipped_count: 0,
+                shutting_down: false,
+                completions: Vec::new(),
+            }),
         }
     }
 
@@ -59,7 +86,9 @@ impl IoState {
         self.lock.unlock();
     }
 
-    /// Account an async op that will not complete (C `TpCancelAsyncIoOperation`).
+    /// Account an async op that will not complete (C `TpCancelAsyncIoOperation`):
+    /// just drops one pending op. Its completion, if it still arrives, is dropped
+    /// because `pending_count` is 0 by then.
     pub fn cancel_async(&self) {
         self.lock.lock();
         let inner = unsafe { &mut *self.inner.get() };
@@ -69,18 +98,67 @@ impl IoState {
         self.lock.unlock();
     }
 
-    /// A completion arrived: if an op was pending, consume one and queue the
-    /// completion (caller then submits). Returns whether to submit.
-    pub(crate) fn on_completion(&self, status: i32, information: usize, cvalue: usize) -> bool {
+    /// Ops pending but cancelled become "skipped" (C `tp_object_cancel` for I/O):
+    /// their completions still reach the port and must be drained during shutdown.
+    pub(crate) fn cancel_to_skipped(&self) {
         self.lock.lock();
         let inner = unsafe { &mut *self.inner.get() };
-        let submit = inner.pending_count > 0;
-        if submit {
+        inner.skipped_count += inner.pending_count;
+        inner.pending_count = 0;
+        self.lock.unlock();
+    }
+
+    /// Whether the object still owes an I/O callback -- either an async op is
+    /// outstanding (C `object_is_finished` checks `u.io.pending_count`) OR a
+    /// completion has been queued but its callback hasn't been dispatched yet.
+    ///
+    /// The second half closes a race the C avoids by doing pending-- and the submit
+    /// accounting under one lock: here `handle_completion` decrements pending and
+    /// queues the completion atomically, but the submit's running++ happens later,
+    /// so a queued completion must count as busy or TpWaitForIoCompletion(.,FALSE)
+    /// could return before the callback runs.
+    pub(crate) fn is_busy(&self) -> bool {
+        self.lock.lock();
+        let inner = unsafe { &*self.inner.get() };
+        let busy = inner.pending_count > 0 || !inner.completions.is_empty();
+        self.lock.unlock();
+        busy
+    }
+
+    /// Begin teardown (C `TpReleaseIoCompletion`): mark shutting-down and report
+    /// whether the object can be destroyed right now (nothing left to drain).
+    pub(crate) fn begin_shutdown(&self) -> bool {
+        self.lock.lock();
+        let inner = unsafe { &mut *self.inner.get() };
+        inner.shutting_down = true;
+        let can_destroy = inner.pending_count == 0 && inner.skipped_count == 0;
+        self.lock.unlock();
+        can_destroy
+    }
+
+    /// A completion just arrived from the port (the body of C `ioqueue_thread_proc`).
+    /// Decide what the service thread does with it.
+    pub(crate) fn handle_completion(&self, status: i32, information: usize, cvalue: usize) -> IoAction {
+        self.lock.lock();
+        let inner = unsafe { &mut *self.inner.get() };
+        if inner.shutting_down && inner.pending_count == 0 {
+            // Draining: consume one skipped completion; destroy on the last.
+            if inner.skipped_count > 0 {
+                inner.skipped_count -= 1;
+            }
+            let act = if inner.skipped_count > 0 { IoAction::Ignore } else { IoAction::Destroy };
+            self.lock.unlock();
+            return act;
+        }
+        if inner.pending_count > 0 {
             inner.pending_count -= 1;
             inner.completions.push(Completion { status, information, cvalue });
+            self.lock.unlock();
+            return IoAction::Submit;
         }
+        // No op pending (e.g. cancelled via TpCancelAsyncIoOperation): drop it.
         self.lock.unlock();
-        submit
+        IoAction::Ignore
     }
 
     /// Pop the next queued completion (at dispatch). `(status, information, cvalue)`.
@@ -170,15 +248,20 @@ impl<Os: IoOs> IoQueue<Os> {
         self.os.associate(port, file, io as u64);
     }
 
-    /// Unbind an I/O object; wake the thread so it can exit once the last is gone.
-    pub fn obj_removed(&self) {
+    /// Account an I/O object leaving the queue on the immediate-destroy path (C
+    /// `tp_ioqueue_unlock`, via tp_object_prepare_shutdown). Wake the thread if it
+    /// was the last, so an idle thread can terminate.
+    pub fn unlock(&self) {
         self.lock.lock();
         let inner = unsafe { &mut *self.inner.get() };
         inner.objcount -= 1;
+        let last = inner.objcount == 0;
         let port = inner.port;
         self.lock.unlock();
-        // Sentinel (key 0) so the thread re-checks objcount / terminates.
-        self.os.post_completion(port, 0, 0, 0, 0);
+        if last {
+            // Sentinel (key 0) so the thread re-checks objcount / terminates.
+            self.os.post_completion(port, 0, 0, 0, 0);
+        }
     }
 
     fn run_io(&self) {
@@ -192,10 +275,20 @@ impl<Os: IoOs> IoQueue<Os> {
             let (key, cvalue, status, information) = self.os.remove_completion(port);
             if key != 0 {
                 let io = key as *mut ThreadpoolObject;
-                // SAFETY: the key is a live I/O object until obj_removed (after
-                // which the kernel posts no more real completions for it).
-                if unsafe { (*io).io_state() }.on_completion(status, information, cvalue) {
-                    (self.on_submit)(io);
+                // SAFETY: the key stays a live I/O object until it is destroyed here
+                // (Destroy) or on the immediate-release path; the "expected
+                // completions" accounting guarantees no completion outlives it.
+                match unsafe { (*io).io_state() }.handle_completion(status, information, cvalue) {
+                    IoAction::Submit => (self.on_submit)(io),
+                    IoAction::Destroy => {
+                        self.lock.lock();
+                        let inner = unsafe { &mut *self.inner.get() };
+                        inner.objcount -= 1;
+                        self.lock.unlock();
+                        unsafe { (*io).set_shutdown() };
+                        tp_object_release(io);
+                    }
+                    IoAction::Ignore => {}
                 }
             }
 
@@ -378,7 +471,43 @@ mod tests {
         assert_eq!(res.information.load(Ordering::Relaxed), 4096, "iosb.information");
         assert_eq!(res.cvalue.load(Ordering::Relaxed), 0xCAFE, "cvalue");
 
-        q.obj_removed();
+        q.unlock();
         q.shutdown();
+    }
+
+    /// The "expected completions" accounting (C bdba5ba5f65), exercised at the
+    /// IoState level without freeing objects.
+    #[test]
+    fn io_state_expected_completions() {
+        let s = IoState::new();
+
+        // A pending op's completion is queued + submitted, and keeps the object busy
+        // until dispatched (popped); a completion with nothing pending is dropped.
+        s.start_async();
+        assert!(s.is_busy());
+        assert_eq!(s.handle_completion(0, 0, 0), IoAction::Submit);
+        assert!(s.is_busy(), "a queued completion keeps it busy until dispatched");
+        assert!(s.pop_completion().is_some());
+        assert!(!s.is_busy());
+        assert_eq!(s.handle_completion(0, 0, 0), IoAction::Ignore);
+
+        // Start two ops, cancel them to skipped (TpWaitForIoCompletion(.,TRUE)).
+        s.start_async();
+        s.start_async();
+        s.cancel_to_skipped();
+        assert!(!s.is_busy());
+
+        // begin_shutdown must report "cannot destroy yet" (2 skipped outstanding).
+        assert!(!s.begin_shutdown());
+        // Drain: first skipped completion is skipped, the last one destroys.
+        assert_eq!(s.handle_completion(0, 0, 0), IoAction::Ignore);
+        assert_eq!(s.handle_completion(0, 0, 0), IoAction::Destroy);
+    }
+
+    /// With nothing outstanding, begin_shutdown authorises immediate destruction.
+    #[test]
+    fn io_state_immediate_destroy() {
+        let s = IoState::new();
+        assert!(s.begin_shutdown());
     }
 }

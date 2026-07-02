@@ -381,7 +381,10 @@ pub extern "system" fn TpAllocWait(
 #[unsafe(no_mangle)]
 pub extern "system" fn TpSetWait(wait: *mut ThreadpoolObject, handle: *mut c_void, timeout: *const i64) {
     unsafe {
-        let to = if timeout.is_null() { None } else { Some(*timeout) };
+        // Match upstream `if (handle && timeout)`: the timeout pointer is only valid
+        // when a handle is armed. Disarming (handle == NULL) must NOT dereference it --
+        // apps pass garbage there (tests/threadpool.c: `TpSetWait(w, NULL, 0xdeadbeef)`).
+        let to = if handle.is_null() || timeout.is_null() { None } else { Some(*timeout) };
         (*wait_queue()).set_wait(wait, handle as u64, to, false);
     }
 }
@@ -552,9 +555,14 @@ pub extern "system" fn TpWaitForIoCompletion(io: *mut ThreadpoolObject, cancel_p
 #[unsafe(no_mangle)]
 pub extern "system" fn TpReleaseIoCompletion(io: *mut ThreadpoolObject) {
     unsafe {
-        (*io).set_shutdown();
-        (*io_queue()).obj_removed();
-        tp_object_release(io);
+        // Mark shutting-down; destroy now only if no completions are still outstanding.
+        // Otherwise the I/O service thread destroys the object once the last skipped
+        // completion drains, so a completion never lands on freed memory.
+        if (*io).io_state().begin_shutdown() {
+            (*io_queue()).unlock(); // tp_ioqueue_unlock: objcount--, wake if last
+            (*io).set_shutdown();
+            tp_object_release(io);
+        }
     }
 }
 

@@ -38,7 +38,12 @@ pub trait WaitOs: PoolOs {
     /// Create an auto-reset (synchronization) event.
     fn create_event(&self) -> u64;
     fn set_event(&self, event: u64);
+    /// Close a handle (NtClose). Used for both bucket events and duped wait handles.
     fn close_event(&self, event: u64);
+    /// Duplicate a caller-supplied wait handle into our process (NtDuplicateObject),
+    /// so the service thread waits on a handle we own and the app may close its copy
+    /// immediately after TpSetWait. Returns 0 on failure (fall back to the raw handle).
+    fn duplicate_handle(&self, handle: u64) -> u64;
     /// Wait until one of `handles` signals or `timeout_100ns` elapses. Returns the
     /// index of the signaled handle, or `None` on timeout.
     fn wait_multiple(&self, handles: &[u64], timeout_100ns: i64) -> Option<usize>;
@@ -47,7 +52,8 @@ pub trait WaitOs: PoolOs {
 /// One wait object's scheduling state (the C `u.wait`), owned by its bucket.
 struct WaitEntry {
     obj: *mut ThreadpoolObject,
-    handle: u64,   // 0 = reserved (no handle armed)
+    handle: u64,        // 0 = reserved (no handle armed); the caller's raw handle
+    duped_handle: u64,  // our private duplicate of `handle` (0 = none); waited on
     deadline: i64, // absolute system-time 100ns; NO_DEADLINE = infinite
     serial: u32,   // bumped on handle change, to drop a stale signal
     /// Repeating (legacy RtlRegisterWait without WT_EXECUTEONLYONCE): re-arm after
@@ -133,6 +139,7 @@ impl<Os: WaitOs> WaitQueue<Os> {
         bk.entries.push(WaitEntry {
             obj,
             handle: 0,
+            duped_handle: 0,
             deadline: NO_DEADLINE,
             serial: 0,
             repeating: false,
@@ -176,6 +183,17 @@ impl<Os: WaitOs> WaitQueue<Os> {
         let bk = unsafe { &mut *b };
         let e = &mut bk.entries[idx];
         let same = e.handle == handle;
+        // Re-duplicate: drop the previous private copy, then duplicate the new handle
+        // so the service thread waits on a handle we own. The app is allowed to close
+        // `handle` right after this call (esp. waitable timers). Matches upstream
+        // acf72ed171a "Duplicate handles for thread pool waits".
+        if e.duped_handle != 0 {
+            self.os.close_event(e.duped_handle);
+            e.duped_handle = 0;
+        }
+        if handle != 0 {
+            e.duped_handle = self.os.duplicate_handle(handle); // 0 -> fall back to raw
+        }
         e.handle = handle;
         e.deadline = if handle != 0 {
             match timeout {
@@ -208,6 +226,10 @@ impl<Os: WaitOs> WaitQueue<Os> {
         self.lock.lock();
         if let Some((b, idx)) = self.find(obj) {
             let bk = unsafe { &mut *b };
+            let dup = bk.entries[idx].duped_handle;
+            if dup != 0 {
+                self.os.close_event(dup);
+            }
             bk.entries.swap_remove(idx);
             bk.objcount -= 1;
             let ev = bk.update_event;
@@ -230,6 +252,13 @@ impl<Os: WaitOs> WaitQueue<Os> {
                 }
                 let ev = bk.update_event;
                 self.lock.unlock();
+                // Close any wait handles still duplicated (normally none: obj_removed
+                // frees them; this covers a shutdown with objects still bound).
+                for e in bk.entries.iter() {
+                    if e.duped_handle != 0 {
+                        self.os.close_event(e.duped_handle);
+                    }
+                }
                 self.os.close_event(ev);
                 drop(unsafe { Box::from_raw(bucket) });
                 return;
@@ -254,7 +283,10 @@ impl<Os: WaitOs> WaitQueue<Os> {
                         e.deadline = NO_DEADLINE; // one-shot disarm
                     }
                 } else {
-                    handles.push(e.handle);
+                    // Wait on our private duplicate so a closed caller handle can't
+                    // fail the whole NtWaitForMultipleObjects (fall back to raw if the
+                    // duplicate failed).
+                    handles.push(if e.duped_handle != 0 { e.duped_handle } else { e.handle });
                     metas.push((e.obj, e.serial));
                     if e.deadline < min_deadline {
                         min_deadline = e.deadline;
@@ -355,38 +387,76 @@ mod tests {
     use std::thread::JoinHandle;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    /// Shared mock event registry: auto-reset events + a multi-wait, driven by the
-    /// test (it creates + signals the "object" handles).
+    /// One shared kernel object: an auto-reset signaled bit + a handle refcount, so
+    /// duplicating a handle keeps the object alive after the source handle is closed
+    /// (models NtDuplicateObject / DUPLICATE_SAME_ACCESS).
+    struct MockObj {
+        signaled: bool,
+        refs: u32,
+    }
+    struct MockState {
+        objects: HashMap<u64, MockObj>, // object id -> state
+        handles: HashMap<u64, u64>,     // handle id -> object id
+    }
+    /// Shared mock registry: objects reachable through one or more handles + a
+    /// multi-wait, driven by the test (it creates, duplicates, signals + closes).
     struct MockReg {
-        events: Mutex<HashMap<u64, bool>>, // handle -> signaled
+        st: Mutex<MockState>,
         cv: Condvar,
         next: AtomicU64,
     }
     impl MockReg {
         fn new() -> Self {
-            MockReg { events: Mutex::new(HashMap::new()), cv: Condvar::new(), next: AtomicU64::new(1) }
+            MockReg {
+                st: Mutex::new(MockState { objects: HashMap::new(), handles: HashMap::new() }),
+                cv: Condvar::new(),
+                next: AtomicU64::new(1),
+            }
         }
         fn create_event(&self) -> u64 {
+            let obj = self.next.fetch_add(1, Ordering::Relaxed);
             let h = self.next.fetch_add(1, Ordering::Relaxed);
-            self.events.lock().unwrap().insert(h, false);
+            let mut st = self.st.lock().unwrap();
+            st.objects.insert(obj, MockObj { signaled: false, refs: 1 });
+            st.handles.insert(h, obj);
             h
         }
+        /// New handle to the same object (refs++). 0 if the source is unknown.
+        fn duplicate_handle(&self, h: u64) -> u64 {
+            let mut st = self.st.lock().unwrap();
+            let Some(&obj) = st.handles.get(&h) else { return 0 };
+            st.objects.get_mut(&obj).unwrap().refs += 1;
+            let d = self.next.fetch_add(1, Ordering::Relaxed);
+            st.handles.insert(d, obj);
+            d
+        }
         fn set_event(&self, h: u64) {
-            *self.events.lock().unwrap().entry(h).or_insert(false) = true;
-            self.cv.notify_all();
+            let mut st = self.st.lock().unwrap();
+            if let Some(&obj) = st.handles.get(&h) {
+                st.objects.get_mut(&obj).unwrap().signaled = true;
+                self.cv.notify_all();
+            }
         }
         fn close_event(&self, h: u64) {
-            self.events.lock().unwrap().remove(&h);
+            let mut st = self.st.lock().unwrap();
+            if let Some(obj) = st.handles.remove(&h) {
+                let o = st.objects.get_mut(&obj).unwrap();
+                o.refs -= 1;
+                if o.refs == 0 {
+                    st.objects.remove(&obj);
+                }
+            }
         }
         fn wait_multiple(&self, handles: &[u64], timeout_100ns: i64) -> Option<usize> {
-            let mut g = self.events.lock().unwrap();
+            let mut g = self.st.lock().unwrap();
             let deadline = std::time::Instant::now()
                 + Duration::from_nanos(timeout_100ns.max(0) as u64 * 100);
             loop {
                 for (i, h) in handles.iter().enumerate() {
-                    if let Some(s) = g.get_mut(h) {
-                        if *s {
-                            *s = false; // auto-reset
+                    if let Some(&obj) = g.handles.get(h) {
+                        let o = g.objects.get_mut(&obj).unwrap();
+                        if o.signaled {
+                            o.signaled = false; // auto-reset
                             return Some(i);
                         }
                     }
@@ -443,6 +513,9 @@ mod tests {
         }
         fn close_event(&self, e: u64) {
             self.reg.close_event(e)
+        }
+        fn duplicate_handle(&self, h: u64) -> u64 {
+            self.reg.duplicate_handle(h)
         }
         fn wait_multiple(&self, handles: &[u64], t: i64) -> Option<usize> {
             self.reg.wait_multiple(handles, t)
@@ -558,6 +631,39 @@ mod tests {
         assert_eq!(s.result.load(Ordering::Relaxed), WAIT_OBJECT_0);
 
         unsafe { wq.obj_removed(o.as_ptr()) };
+        wq.shutdown();
+    }
+
+    /// The caller may close its wait handle immediately after TpSetWait: the pool
+    /// duplicates it, so the wait stays live and still fires when the (shared) object
+    /// is signaled. Without the duplicate the service thread would wait on a closed
+    /// handle and never fire (regression guard for the upstream duped_handle fix).
+    #[test]
+    fn wait_survives_caller_closing_handle() {
+        let reg = Arc::new(MockReg::new());
+        let s = Box::new(WaitState { fired: AtomicI32::new(0), result: AtomicU32::new(123) });
+        let o = Box::new(ThreadpoolObject::new_wait(
+            wait_cb,
+            Box::as_ref(&s) as *const WaitState as *mut c_void,
+            1,
+        ));
+        let os = MockWaitOs { reg: reg.clone(), handles: Mutex::new(Vec::new()) };
+        let wq: Box<WaitQueue<MockWaitOs>> = Box::new(WaitQueue::new(os, wait_on_signal));
+        let wq: &WaitQueue<MockWaitOs> = &wq;
+
+        unsafe { wq.obj_added(o.as_ptr(), false) };
+        let h = reg.create_event(); // caller's handle to object O
+        // A second handle we keep so we can still signal O after the caller closes h.
+        let signaler = reg.duplicate_handle(h);
+        unsafe { wq.set_wait(o.as_ptr(), h, None, false) }; // pool duplicates h internally
+        reg.close_event(h); // caller drops its handle immediately -- O stays alive
+
+        reg.set_event(signaler);
+        spin_until(|| s.fired.load(Ordering::Relaxed) == 1, "wait fired via duplicate");
+        assert_eq!(s.result.load(Ordering::Relaxed), WAIT_OBJECT_0);
+
+        unsafe { wq.obj_removed(o.as_ptr()) };
+        reg.close_event(signaler);
         wq.shutdown();
     }
 }

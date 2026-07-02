@@ -24,6 +24,8 @@ const WAIT_ANY: i32 = 1;
 const ALL_ACCESS: u32 = 0x001F_0003;
 /// FileCompletionInformation.
 const FILE_COMPLETION_INFORMATION: i32 = 30;
+/// NtDuplicateObject Options: keep the source's access mask.
+const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
 
 #[inline]
 fn nt_current_process() -> Handle {
@@ -52,6 +54,15 @@ unsafe extern "system" {
         client_id: *mut c_void,
     ) -> i32;
     fn NtClose(handle: Handle) -> i32;
+    fn NtDuplicateObject(
+        source_process: Handle,
+        source: Handle,
+        target_process: Handle,
+        target: *mut Handle,
+        access: u32,
+        attributes: u32,
+        options: u32,
+    ) -> i32;
 
     fn RtlWaitOnAddress(addr: *const c_void, cmp: *const c_void, size: usize, timeout: *const i64) -> i32;
     fn RtlWakeAddressSingle(addr: *const c_void);
@@ -169,6 +180,24 @@ impl WaitOs for WineOs {
     }
     fn close_event(&self, event: u64) {
         unsafe { NtClose(event as Handle) };
+    }
+    fn duplicate_handle(&self, handle: u64) -> u64 {
+        // Duplicate into our own process so the wait thread owns a handle the app
+        // can't close out from under it (waitable timers/semaphores are commonly
+        // closed right after TpSetWait). 0 on failure -> caller falls back to raw.
+        let mut dup: Handle = core::ptr::null_mut();
+        let status = unsafe {
+            NtDuplicateObject(
+                nt_current_process(),
+                handle as Handle,
+                nt_current_process(),
+                &mut dup,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        if status == 0 { dup as u64 } else { 0 }
     }
     fn wait_multiple(&self, handles: &[u64], timeout_100ns: i64) -> Option<usize> {
         // MAX_WAIT_OBJECTS (63) armed handles + the update_event.
