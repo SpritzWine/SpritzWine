@@ -30,6 +30,7 @@ members = [
 exclude = [
 "src_dll/ntdll_pe",
 "src_dll/avrt_pe",
+"src_dll/hid_pe",
 "src_sys/hidparse_pe",
 ]
 

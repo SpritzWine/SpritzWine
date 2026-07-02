@@ -1,0 +1,34 @@
+[package]
+name = "wine_hid_pe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# PE-side Rust for hid.dll's HidP_* value engine (dlls/hid/hidp.c). Like the
+# sibling `wine_ntdll_pe` / `wine_avrt_pe` / `wine_hidparse_pe` staticlibs, this
+# links directly into Wine's PE `hid.dll` (winegcc -nodefaultlibs path via
+# EXTRADLLFLAGS). It is a freestanding `no_std` static library with NO allocator:
+# the HidP_* value getters/setters walk a preparsed blob and read/write bit
+# fields in caller-provided buffers in place, so nothing is allocated. Moving it
+# to Rust replaces hand-rolled C pointer arithmetic + a bit copier that indexes a
+# live, device-supplied HID report by untrusted caps offsets (start_byte/bit_size)
+# with no bound against the report length -- an OOB read/write on a crafted report
+# -- with bounds-checked slicing.
+[lib]
+name = "wine_hid_pe"
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+# The PE link environment has no unwinder; abort on panic. Excluded from the
+# workspace (../../Cargo.toml `exclude`) so this profile is honored. codegen-units
+# = 1 keeps the crate one object so the PE link pulls every entry point by forcing
+# the single anchor symbol -- mirrors the other *_pe crates.
+[profile.release]
+panic = "abort"
+opt-level = "z"
+codegen-units = 1
+lto = true
+strip = true
+
+[profile.dev]
+panic = "abort"
