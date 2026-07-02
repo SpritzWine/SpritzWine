@@ -56,12 +56,23 @@ mod rt {
 
     // The precompiled std rlibs (built with panic=unwind) reference these unwinding
     // symbols from cold paths. Under `panic = "abort"` they're never reached, but
-    // the `-nodefaultlibs` PE link still needs them resolved.
-    #[unsafe(no_mangle)]
-    extern "C" fn rust_eh_personality() {}
-
-    #[unsafe(no_mangle)]
-    extern "C" fn _Unwind_Resume() {}
+    // the `-nodefaultlibs` PE link still needs them resolved. Unlike the other *_pe
+    // crates these are emitted as WEAK symbols: hidparse.sys links BOTH this crate
+    // and wine_hidparse_pe (hidp.c is shared, PARENTSRC=../hid), and two strong
+    // definitions of the same stub would be a "duplicate symbol" link error. Weak
+    // lets the linker keep one; when this crate links alone (hid.dll) the weak
+    // definition is still a definition. Emitted via asm so `.weak` applies (stable
+    // Rust has no weak-linkage attribute); i386 PE prefixes symbols with `_`.
+    #[cfg(target_arch = "x86_64")]
+    core::arch::global_asm!(
+        ".weak rust_eh_personality", ".weak _Unwind_Resume",
+        "rust_eh_personality:", "_Unwind_Resume:", "ret",
+    );
+    #[cfg(target_arch = "x86")]
+    core::arch::global_asm!(
+        ".weak _rust_eh_personality", ".weak __Unwind_Resume",
+        "_rust_eh_personality:", "__Unwind_Resume:", "ret",
+    );
 }
 
 /// Single anchor symbol forced by the PE link (`-Wl,/include:`) so the whole
