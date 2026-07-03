@@ -34,6 +34,7 @@ TARGETS (choose one or more):
 OPTIONS:
     --payload <DIR>         The SpritzWine tree to install (default: this binary's dir)
     --name <NAME>           Steam tool / Lutris runner directory name (default: SpritzWine)
+    --no-beisl              Don't install the bundled Beisl perf tracer (installed by default)
     --list                  Print detected Steam/Lutris targets and exit
     -h, --help              Show this help
 ";
@@ -48,6 +49,7 @@ struct Args {
     lutris_dir: Option<PathBuf>,
     steam_auto: bool,
     steam_dir: Option<PathBuf>,
+    no_beisl: bool,
     list: bool,
 }
 
@@ -69,6 +71,7 @@ fn parse() -> Result<Args> {
                 std::process::exit(0);
             }
             "--list" => a.list = true,
+            "--no-beisl" => a.no_beisl = true,
             "--steam" => a.steam_auto = true,
             "--lutris" => a.lutris_auto = true,
             "--payload" => a.payload = Some(next("--payload")?),
@@ -199,6 +202,12 @@ fn run() -> Result<()> {
     if let Some(prefix) = &a.prefix {
         println!("==> WINEPREFIX: {}", prefix.display());
         core::init_prefix(&payload, prefix, &mut |line| println!("    {line}"))?;
+    }
+
+    // Beisl (the bundled perf tracer) installs onto PATH by default when present.
+    if core::has_beisl(&payload) && !a.no_beisl {
+        println!("==> Beisl (perf tracer)");
+        core::install_beisl(&payload, &mut |line| println!("    {line}"))?;
     }
 
     println!("Done.");

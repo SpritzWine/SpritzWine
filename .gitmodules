@@ -2,3 +2,6 @@
 	path = wine
 	url = ssh://git@codeberg.org/SpritzWine/wine.git
 	branch = spritzwine
+[submodule "beisl"]
+	path = beisl
+	url = ssh://git@codeberg.org/SpritzWine/Beisl.git

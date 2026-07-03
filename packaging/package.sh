@@ -84,6 +84,24 @@ if command -v strip >/dev/null 2>&1; then
     done
 fi
 
+# Beisl (the perf tracer) is bundled unless WITH_BEISL=no. The CLI wrapper is always
+# built; its setup GUI needs the same libcosmic deps as spritzwine-setup, so it follows
+# WITH_INSTALLER. After extracting the tree, `beisl install` puts it on PATH.
+if [ "${WITH_BEISL:-yes}" != "no" ] && [ -d "$ROOT/beisl" ]; then
+    echo "==> [4b/5] Building and bundling Beisl (perf tracer)"
+    ( cd "$ROOT/beisl" && cargo build --release -p beisl )
+    install -m755 "$ROOT/beisl/target/release/beisl" "$TREE/beisl"
+    if [ "${WITH_INSTALLER:-yes}" != "no" ]; then
+        ( cd "$ROOT/beisl/crates/beisl-gui" && cargo build --release )
+        install -m755 "$ROOT/beisl/crates/beisl-gui/target/release/beisl-setup" "$TREE/beisl-setup"
+    fi
+    if command -v strip >/dev/null 2>&1; then
+        for b in beisl beisl-setup; do
+            [ -f "$TREE/$b" ] && strip --strip-unneeded "$TREE/$b" 2>/dev/null || true
+        done
+    fi
+fi
+
 echo "==> [5/5] Creating the tarball"
 TARBALL="$DIST/$NAME-x86_64.tar.xz"
 tar -C "$DIST" -caf "$TARBALL" "$NAME"
@@ -94,4 +112,5 @@ cat <<EOF
    Try it:    tar -C /tmp -xf "$TARBALL" && /tmp/$NAME/spritzwine --version
    Install:   /tmp/$NAME/spritzwine-setup           # graphical installer (Steam/Lutris/prefix)
               /tmp/$NAME/spritzwine-cli-install --help   # headless equivalent
+   Perf:      /tmp/$NAME/beisl install              # put beisl on PATH -> add 'beisl %command%' to launch options
 EOF

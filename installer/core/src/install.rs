@@ -299,6 +299,41 @@ pub fn init_prefix(payload: &Path, prefix: &Path, log: &mut dyn FnMut(&str)) -> 
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------
+// Beisl (bundled perf tracer)
+// ---------------------------------------------------------------------------------------
+
+/// Whether this payload bundles Beisl, so the front-ends can offer to install it.
+pub fn has_beisl(payload: &Path) -> bool {
+    payload.join("beisl").is_file()
+}
+
+/// Install the bundled Beisl (the perf tracer) onto the user's PATH by running its own
+/// `install` subcommand (`<payload>/beisl install`): that copies `beisl` (+ the bundled
+/// `beisl-setup` GUI) into `~/.local/bin` and registers a desktop entry, so `beisl %command%`
+/// works in launch options straight away. Output is streamed to `log`.
+pub fn install_beisl(payload: &Path, log: &mut dyn FnMut(&str)) -> Result<()> {
+    let bin = payload.join("beisl");
+    if !bin.is_file() {
+        bail!("this build does not bundle Beisl ({} missing)", bin.display());
+    }
+    let out = Command::new(&bin)
+        .arg("install")
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("running {} install", bin.display()))?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        log(line);
+    }
+    if !out.status.success() {
+        for line in String::from_utf8_lossy(&out.stderr).lines() {
+            log(line);
+        }
+        bail!("beisl install exited with {}", out.status);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

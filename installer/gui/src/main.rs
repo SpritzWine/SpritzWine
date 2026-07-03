@@ -36,6 +36,7 @@ enum Action {
     Lutris { dir: PathBuf, name: String },
     Steam { dir: PathBuf, name: String },
     Prefix(PathBuf),
+    Beisl,
 }
 
 impl Action {
@@ -45,6 +46,7 @@ impl Action {
             Action::Lutris { dir, name } => format!("Lutris runner: {}/{name}", dir.display()),
             Action::Steam { dir, name } => format!("Steam tool: {}/{name}", dir.display()),
             Action::Prefix(p) => format!("Initialise WINEPREFIX: {}", p.display()),
+            Action::Beisl => "Install Beisl (perf tracer) on PATH".to_string(),
         }
     }
 
@@ -70,6 +72,11 @@ impl Action {
             Action::Prefix(prefix) => {
                 core::init_prefix(payload, prefix, &mut |l| on(None, Some(l.to_string())))
                     .map_err(|e| format!("{e:#}"))?;
+            }
+            Action::Beisl => {
+                core::install_beisl(payload, &mut |l| on(None, Some(l.to_string())))
+                    .map_err(|e| format!("{e:#}"))?;
+                on(None, Some("Beisl installed — add `beisl %command%` to a game's launch options.".into()));
             }
         }
         Ok(())
@@ -147,6 +154,7 @@ enum Message {
     CustomPath(String),
     TogglePrefix(bool),
     PrefixPath(String),
+    ToggleBeisl(bool),
     Name(String),
     StartInstall,
     Tick,
@@ -173,6 +181,8 @@ struct AppModel {
     custom_path: String,
     prefix_on: bool,
     prefix_path: String,
+    beisl_present: bool,
+    beisl_on: bool,
 
     worker: Option<Arc<Mutex<Shared>>>,
     fraction: f32,
@@ -237,6 +247,10 @@ impl AppModel {
         if self.prefix_on && !self.prefix_path.trim().is_empty() {
             actions.push(Action::Prefix(PathBuf::from(self.prefix_path.trim())));
         }
+        // Beisl rides along with the selected targets (optional, on by default).
+        if self.beisl_on {
+            actions.push(Action::Beisl);
+        }
         actions
     }
 }
@@ -261,6 +275,8 @@ impl Application for AppModel {
         let lutris_roots = core::detect_lutris_roots();
         let steam_sel = vec![true; steam_roots.len()];
         let lutris_sel = vec![true; lutris_roots.len()];
+        // Beisl rides along if the bundle carries it; on by default, but optional.
+        let beisl_present = flags.payload.as_ref().map(|p| core::has_beisl(p)).unwrap_or(false);
 
         let app = AppModel {
             core,
@@ -277,6 +293,8 @@ impl Application for AppModel {
             custom_path: home().join("SpritzWine").display().to_string(),
             prefix_on: false,
             prefix_path: home().join(".spritzwine").display().to_string(),
+            beisl_present,
+            beisl_on: beisl_present,
             worker: None,
             fraction: 0.0,
             current: String::new(),
@@ -316,6 +334,7 @@ impl Application for AppModel {
             Message::CustomPath(p) => self.custom_path = p,
             Message::TogglePrefix(v) => self.prefix_on = v,
             Message::PrefixPath(p) => self.prefix_path = p,
+            Message::ToggleBeisl(v) => self.beisl_on = v,
             Message::Name(n) => self.name = n,
             Message::StartInstall => {
                 if let Ok(payload) = self.payload.clone() {
@@ -500,6 +519,15 @@ impl AppModel {
             );
         }
 
+        // Beisl (bundled perf tracer) — optional, on by default.
+        if self.beisl_present {
+            col = col.push(
+                widget::checkbox(self.beisl_on)
+                    .label("Also install Beisl (performance tracer) — adds `beisl` to your PATH")
+                    .on_toggle(Message::ToggleBeisl),
+            );
+        }
+
         let mut install = widget::button::suggested("Install");
         if self.any_target_selected() {
             install = install.on_press(Message::StartInstall);
@@ -547,6 +575,11 @@ impl AppModel {
                 if self.lutris_on && !self.lutris_roots.is_empty() {
                     col = col.push(widget::text::caption(
                         "Lutris: in a game's runner options, pick the Wine version by this name.",
+                    ));
+                }
+                if self.beisl_on {
+                    col = col.push(widget::text::caption(
+                        "Beisl: add `beisl %command%` to a game's Steam launch options to trace it.",
                     ));
                 }
             }

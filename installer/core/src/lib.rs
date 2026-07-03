@@ -20,8 +20,8 @@ pub mod steam;
 
 pub use detect::{detect_lutris_roots, detect_steam_roots, LutrisRoot, SteamRoot};
 pub use install::{
-    detect_payload, init_prefix, install_custom, install_lutris, install_steam, validate_payload,
-    Progress,
+    detect_payload, has_beisl, init_prefix, install_beisl, install_custom, install_lutris,
+    install_steam, validate_payload, Progress,
 };
 
 /// Default display/install name used for the Steam tool and Lutris runner directories.
