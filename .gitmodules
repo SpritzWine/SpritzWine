@@ -4,4 +4,4 @@
 	branch = spritzwine
 [submodule "beisl"]
 	path = beisl
-	url = ssh://git@codeberg.org/SpritzWine/Beisl.git
+	url = ssh://git@codeberg.org/SpritzWine/beisl.git
