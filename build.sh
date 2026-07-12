@@ -38,6 +38,14 @@ git submodule update --init --recursive
 
 echo "==> [2/6] Configuring Wine"
 cd "$ROOT/wine"
+# Proton-based branches (spritzvalve-*) don't track wine's generated files the way
+# vanilla WineHQ does — configure, include/wine/vulkan.h, the syscall headers and
+# the wineserver protocol are generated at build time (Valve's build system does the
+# same). Each step is a silent no-op on an in-sync vanilla-based tree.
+[ -x configure ] || autoreconf -f
+[ -f include/wine/vulkan.h ] || (cd dlls/winevulkan && python3 ./make_vulkan)
+./tools/make_specfiles syscalls
+./tools/make_requests
 if [ -f Makefile ] && [ Makefile -nt configure ]; then
     echo "    wine/Makefile is up to date; skipping configure."
 else
