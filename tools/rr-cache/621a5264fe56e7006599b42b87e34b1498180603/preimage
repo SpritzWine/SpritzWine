@@ -1,0 +1,35 @@
+EXTRADEFS = -D_COMDLG32_
+MODULE    = comdlg32.dll
+UNIXLIB   = comdlg32.so
+IMPORTLIB = comdlg32
+IMPORTS   = uuid shell32 shlwapi comctl32 user32 gdi32 advapi32
+DELAYIMPORTS = ole32 winspool
+
+<<<<<<<
+=======
+# Unix side links the standalone Rust portal client (libwine_comdlg32.so), which
+# drives the host XDG desktop portal. Reuses the shared -L from configure.
+UNIX_LIBS = $(WINE_RUST_LDFLAGS) -Wl,-lwine_comdlg32
+
+VER_FILEDESCRIPTION_STR = "Common Dialog Boxes"
+VER_PRODUCTVERSION      = 6,0,2900,5512
+
+>>>>>>>
+SOURCES = \
+	cdlg32.c \
+	colordlg.c \
+	comdlg32.rc \
+	comdlg32_classes.idl \
+	filedlg.c \
+	filedlg31.c \
+	filedlgbrowser.c \
+	finddlg.c \
+	fontdlg.c \
+	itemdlg.c \
+	portal.c \
+	pd32_collate.svg \
+	pd32_landscape.svg \
+	pd32_nocollate.svg \
+	pd32_portrait.svg \
+	printdlg.c \
+	unixlib.c

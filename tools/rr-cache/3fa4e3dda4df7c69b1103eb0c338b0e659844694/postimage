@@ -1,0 +1,17 @@
+MODULE    = hid.dll
+IMPORTLIB = hid
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+# Link the Rust PE staticlib libwine_hid_pe.a (rust/src_dll/hid_pe) -- the HidP_*
+# value engine -- and force its anchor so all entry points are pulled in (see
+# configure.ac WINE_RUST_PE_DIR_*). i386 symbols are `_`-prefixed.
+i386_EXTRADLLFLAGS = -L$(WINE_RUST_PE_DIR_i386) -lwine_hid_pe -Wl,/include:_wine_hid_pe_anchor
+x86_64_EXTRADLLFLAGS = -L$(WINE_RUST_PE_DIR_x86_64) -lwine_hid_pe -Wl,/include:wine_hid_pe_anchor
+
+VER_FILEDESCRIPTION_STR = "Wine HID"
+
+SOURCES = \
+	hidd.c \
+	hidp.c \
+	version.rc
