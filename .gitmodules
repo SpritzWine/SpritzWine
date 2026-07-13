@@ -1,7 +1,8 @@
 [submodule "wine"]
 	path = wine
 	url = ssh://git@codeberg.org/SpritzWine/wine.git
-	branch = spritzwine
+	branch = spritzvalve-11.0-1
 [submodule "beisl"]
 	path = beisl
 	url = ssh://git@codeberg.org/SpritzWine/beisl.git
+	branch = v0.1.0
