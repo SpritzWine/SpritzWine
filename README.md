@@ -24,9 +24,7 @@ honestly is, and go where the bugs actually live.
 
 Nobody upstream asked for any of this, and nobody's inbox is being campaigned at. The code sits
 here — LGPL, working, played on — and if a piece proves itself and somebody wants it, it's
-theirs, no permission needed. Demonstrating beats lobbying. In the same spirit of honesty:
-ntsync still deadlocks 32-bit CEF launchers; we work around it, and no, we haven't root-caused
-it yet.
+theirs, no permission needed. Demonstrating beats lobbying.
 
 **→ [`docs/VISION.md`](docs/VISION.md) — why this exists, where it's going, and what the names
 mean.** The rest of this file is the machinery. Come for the Spritzer, stay for the frametimes.

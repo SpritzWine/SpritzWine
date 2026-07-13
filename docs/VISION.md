@@ -104,9 +104,9 @@ Upstream Wine built that mechanism, and it is where Wine is heading; but Valve's
 still carries a classic native 32-bit unix side. We flipped the switch everywhere and live with
 both halves of that: the upside is real — no 32-bit host libraries needed, ever, on distros that
 are busy dropping them — and so is the bill. Running a path that upstream builds but nobody
-ships means finding the bugs first: the ntsync deadlock below lives precisely in the
-`new-WoW64 × 32-bit` corner that no one else exercises. That trade — early to the future,
-first to its bugs — is accepted, not accidental.
+ships means finding the bugs first — and, as the retraction below records, being the first to
+blame it for bugs it never had. That trade — early to the future, first to its bugs — is
+accepted, not accidental.
 
 ## Correctness is proven by games, not by tests alone
 
@@ -137,13 +137,13 @@ claim to beat isn't a claim.
 
 ## Honest about what's broken
 
-Being candid about open bugs is part of the tone here, so, the current embarrassment:
+Being candid about open bugs is part of the tone here — including when the bug turns out to be
+ours. This section used to document an ntsync deadlock in 32-bit CEF launchers, and we shipped a
+per-game opt-out for it. It was never real: under ntsync *every* wait is an ioctl, so the threads
+we found parked in `/dev/ntsync` ioctls were a healthy process, not a hung one. Both Ubisoft
+titles boot with ntsync on, and the opt-out is gone.
 
-**ntsync deadlocks 32-bit CEF launchers.** Ubisoft Connect hangs with every thread parked in a
-`/dev/ntsync` ioctl on our new-WoW64 build. 64-bit titles are fine. It is worked around per-game
-(`PROTON_NO_NTSYNC=1`, plumbed as the `nontsync` compat-config knob) and **not root-caused** —
-ntsync × new-WoW64 × 32-bit is a combination upstream never exercises. The workaround is a
-workaround. It is not a fix, and it is not being described as one.
+A bug you only ever confirm is not a bug you have investigated.
 
 ## Upstreaming: welcome, not a conquest
 
