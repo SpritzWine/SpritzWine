@@ -6,7 +6,7 @@
 # script (tools/rr-cache in the SpritzWine root repo), so a runner reuses every stitch
 # resolution already made, and writes new ones back.
 #
-#   tools/regenerate.sh spritzvalve-v1  valve-wine/proton_11.0   soda-branding
+#   tools/regenerate.sh spritzvalve     valve-wine/proton_11.0   soda-branding
 #   tools/regenerate.sh spritzwine-gen  winehq/wine-11.12        soda-ntdll
 #
 # Args: <output-branch> <wine-base-ref> <soda-tip-ref> [<soda-home-base>]
@@ -18,7 +18,7 @@
 # upstream commits. Default = the true fork base, parent of the first fschaupp commit.
 set -euo pipefail
 
-OUT_BRANCH="${1:?output branch, e.g. spritzvalve-v1}"
+OUT_BRANCH="${1:?output branch, e.g. spritzvalve}"
 BASE_REF="${2:?wine base ref, e.g. valve-wine/proton_11.0}"
 SODA_REF="${3:?soda tip ref, e.g. soda-branding}"
 
