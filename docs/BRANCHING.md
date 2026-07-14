@@ -96,6 +96,7 @@ Two commits, because `soda-core` sits on `soda-build`. That is the entire histor
 | `soda-glorious` | `soda-core` | DualSense/controller Rust: winebus.sys rumble, dinput, mmdevapi endpoint pairing, winexinput. |
 | `soda-ntdll` | `soda-core` | ntdll Rust: threadpool, `RtlVirtualUnwind2`, SEH hardening, battery/LZNT1, plus the wow64 power thunk. |
 | `soda-branding` | `soda-core` | winecfg strings and icons. Per-consumer. |
+| `soda-fsync` | `soda-core` | Valve's futex inproc-sync backend, vendored onto upstream's inproc-sync framework (ntsync first, `WINEFSYNC=1` to engage). **Upstream bases only** — `proton_11.0` already has fsync. |
 | `soda-demo` | `soda-build` | Rust `ping` + integrationtest harness. Nobody ships this. |
 
 ### Why tiers exist at all
@@ -111,6 +112,10 @@ A tier is justified by exactly one of two things:
 If a change needs neither, **squash it into an existing tier**. More tiers is not more
 structure; it is more rebase surface.
 
+`soda-fsync` is rule 1 in its purest form: Valve's base *already has* fsync, so pouring it into
+`spritzvalve` would be a conflict looking for a place to happen — while an upstream base has
+ntsync but no fsync, and wants it. A tier that exactly one consumer takes.
+
 ---
 
 ## The consumers
@@ -124,7 +129,7 @@ Soda on **upstream WineHQ wine**. No Valve patchset, no Proton, no Prater.
 
 This is what the project is *for*: Rust in Wine, tracking what Wine is becoming rather than
 what Valve froze. It carries the **full mix** — `soda-build` + `soda-core` + `soda-glorious`
-+ `soda-ntdll` + `soda-branding` — and it is the home of everything that has nothing to do
++ `soda-ntdll` + `soda-branding` + `soda-fsync` — and it is the home of everything that has nothing to do
 with games (`soda-ntdll`'s own commit subject says "(spritzwine only)"; battery reporting
 exists because Windows programs ask how much charge is left and Wine had no good answer — no
 frametime was harmed or improved). `regenerate.sh`'s usage example is literally `spritzwine-gen`
@@ -191,6 +196,38 @@ losing game.
 So the shipping consumer is *11.12-authored tiers replayed backwards onto an 11.0 tree*. That
 is not an accident to be cleaned up; it is the steady state, and it is why the replay is a
 script with a tracked rerere cache rather than a one-off rebase somebody did once.
+
+---
+
+## Pouring the upstream glass (the open work)
+
+`regenerate.sh` replays a **linear range** (`<home-base>..<soda-tip>`) onto a wine base. That is
+why `spritzvalve` is easy: `soda-branding` *is* a straight line (build → core → branding), so
+there is a single tip to point at.
+
+The full mix is not a straight line. `soda-glorious`, `soda-ntdll`, `soda-branding` and
+`soda-fsync` are **siblings** on `soda-core` — there is no single ref whose ancestry contains all
+of them. So before the upstream consumer can be poured, the tiers it wants must be **stitched into
+a chain**, and that chain is what `regenerate.sh` gets as its soda tip:
+
+```sh
+# 1. stitch the full mix into a linear tip (once; re-do when a tier moves)
+git checkout -B soda-full soda-core
+git cherry-pick soda-core..soda-glorious \
+                soda-core..soda-ntdll   \
+                soda-core..soda-fsync   \
+                soda-core..soda-branding
+
+# 2. pour it onto an upstream base
+tools/regenerate.sh spritzwine winehq/wine-11.12 soda-full
+```
+
+Order matters where the tiers touch the same files: `soda-ntdll` and `soda-fsync` both live in
+`dlls/ntdll/unix/` (the unwinder/threadpool vs. `sync.c`), so expect the stitch to want a
+resolution there — which is precisely what the tracked `tools/rr-cache` exists to remember.
+
+Do **not** put `soda-fsync` in a chain destined for `spritzvalve`: Valve's base already carries
+fsync.
 
 ---
 
