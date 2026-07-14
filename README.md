@@ -17,6 +17,10 @@ Avatar: Frontiers of Pandora, Risk of Rain 2 and Watch Dogs: Legion — on top o
 Wine (the tree underneath Proton), a base that holds still. When something breaks on a base that
 holds still, we know exactly whose Rust it was.
 
+That base is the *proving ground*, not the destination. The endeavour is Rust in **upstream**
+Wine; Valve's tree is simply the only one anti-tamper titles boot on, so it is what ships first.
+See [`docs/VISION.md`](docs/VISION.md) and [`docs/BRANCHING.md`](docs/BRANCHING.md).
+
 Think big, act small: Rust goes in where it earns its keep — safety, performance, conformance —
 one shipped and proven piece at a time. Converting things is not the goal; it's the tab we pay
 for fewer bugs. When a corner stops yielding value, we leave it in whatever mix of C and Rust it
@@ -107,16 +111,19 @@ thematic **`soda-*` tiers** (`soda-build` → `soda-core` → `soda-ntdll` / `so
 onto a Wine base. `spritzvalve-11.0-1` — the current pin — is
 `valve-wine/proton_11.0` + `soda-build` + `soda-core` + `soda-branding`.
 
-The same tiers are meant to pour into a second glass: **`spritzwine`**, the consumer on an
-*upstream WineHQ* base — the exploratory one. Where `spritzvalve` holds still so games can prove
-the Rust safe, `spritzwine` tracks what Wine is becoming and stages work for the next cycle; it's
-the home of the fuller mix (`soda-ntdll`, `soda-glorious`) and of fixes that have nothing to do
-with games — battery reporting included. It isn't regenerated yet; the branch of that name is
-still the legacy hand-authored fork. See `wine/docs/BRANCHING.md`.
+The same tiers pour into a second glass, and that one is the point: **`spritzwine`**, the
+consumer on an *upstream WineHQ* base. It carries the **full mix** (`soda-ntdll`, `soda-glorious`)
+and the work that has nothing to do with games — battery reporting included. `spritzvalve` holds
+still so that games can prove the Rust safe; `spritzwine` is what that proof is *for*.
+
+So: **spritzvalve is the vehicle, spritzwine is the destination** — and shipping first is not the
+same as being the point. Today only `spritzvalve` exists as a generated consumer; the branch named
+`spritzwine` is still the legacy hand-authored fork, awaiting its first pour. See
+[`docs/BRANCHING.md`](docs/BRANCHING.md).
 
 Because a consumer is regenerated (and force-updated) whenever the tiers or the base move, a
-consumer's history is not stable. The full story — tiers, bases, what lands where — is in the wine
-repo's **`docs/BRANCHING.md`**.
+consumer's history is not stable. The full story — tiers, bases, what lands where — is in
+**[`docs/BRANCHING.md`](docs/BRANCHING.md)**.
 
 Two consequences you should know about before touching anything:
 

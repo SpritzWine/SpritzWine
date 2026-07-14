@@ -52,9 +52,9 @@ the FFI seam.
 (`grep -l lwine_ dlls/*/Makefile.in` in the wine tree answers this question for whatever you
 have checked out. Trust that over this table.)
 
-## Stability over bleeding edge
+## Prove it where it hurts
 
-The base we build on is **Valve's patched Wine** — the tree they maintain for Proton, and the
+The base we ship on is **Valve's patched Wine** — the tree they maintain for Proton, and the
 reason anti-tamper titles work at all. (It is Wine, not Proton: Proton is the whole compatibility
 tool — Wine plus DXVK, vkd3d, the Steam bridge, the launch script. Our answer to *that* is Prater.
 What we take from Valve is the Wine underneath it.)
@@ -68,7 +68,7 @@ is not a footnote; it is where the real work happens. Valve's tree still links t
 libunwind where upstream had already moved to symcrypt and dropped libunwind; its
 `virtual_unwind()` takes an argument ours does not. Each of those is a decision made during the
 replay, in favour of the base. Two bases, one direction of flow — the current versions and the
-exact stitch decisions live in [`wine/docs/BRANCHING.md`](../wine/docs/BRANCHING.md), where they
+exact stitch decisions live in [`BRANCHING.md`](BRANCHING.md), where they
 can be kept honest.
 
 Riding a stable base is not conservatism for its own sake — it is the only way the experiment
@@ -83,15 +83,24 @@ promise about the future — it is what the current replay already does, and a r
 whatever base comes next. The base and the changes never grow into each other. The fork is
 designed to be peeled off.
 
-And the same soda pours into more than one glass — because holding still is a method, not a
-temperament. **`spritzvalve`** is the settled glass: Valve's wine underneath, games on top,
-nothing moving. **`spritzwine`** is the exploratory one: the tiers poured over *upstream* Wine,
-tracking what Wine is becoming rather than what Valve froze — a staging ground for the next
-cycle (today: Wine 12). That is where the bolder work lives, and where fixing plain software
-counts as much as fixing games: the battery and power reporting in `soda-ntdll` exists because
-Windows programs ask how much charge is left and Wine had no good answer — no frametime was
-harmed or improved. One glass proves the Rust doesn't break anything; the other finds out what
-it can do.
+And the same soda pours into more than one glass. This is the part that is easiest to get
+backwards, so it is worth being blunt about which glass is which.
+
+**`spritzwine`** — the tiers poured over *upstream* WineHQ — **is the endeavour.** It is the
+project's actual point: Rust in Wine, tracking what Wine is becoming rather than what Valve
+froze. It carries the full mix, and it is where fixing plain software counts as much as fixing
+games — the battery and power reporting in `soda-ntdll` exists because Windows programs ask how
+much charge is left and Wine had no good answer. No frametime was harmed or improved.
+
+**`spritzvalve`** — the tiers over Valve's Proton Wine — **is the necessity.** The gate this
+project actually respects is *does the game boot?*, and games boot on Valve's tree, because that
+is the tree with the anti-tamper patchset in it. So spritzvalve is the glass we can hand to
+someone, the one Prater is built from, and the one that proves the Rust does not break real
+software. It carries the thin mix on purpose.
+
+The honest ordering, then: **spritzvalve is how we prove SpritzWine is safe. SpritzWine is the
+thing being proven.** Shipping first is not the same as being the point — and today, only
+spritzvalve exists as a generated consumer. The upstream glass is next.
 
 ## The one standing bet: new-WoW64
 
