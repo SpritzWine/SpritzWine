@@ -57,6 +57,13 @@ fn main() {
 
     for (lib_name, lib_file) in &wine_libs {
         let lib_path = format!("{root}dlls/{}/{lib_file}", lib_name);
+        // Cargo caches this script's stdout and replays it while its declared inputs look
+        // unchanged -- and the wine tree is OUTSIDE this package, so by default it is not
+        // an input at all. Without this line, one run that found no ntdll.so poisons every
+        // later build: the "not found" result (with its missing link args) replays even
+        // after wine is built, and the link dies with undefined __wine_dbg_output. A
+        // declared-but-missing path makes cargo re-run the script until the file exists.
+        println!("cargo:rerun-if-changed={lib_path}");
         if std::path::Path::new(&lib_path).exists() {
             println!(
                 "cargo:warning=📁 Found Wine library: {} at {}",
