@@ -1,0 +1,145 @@
+# Build SpritzWine, package the tarball, and prove the result still runs.
+#
+# Runs on the SELF-HOSTED runner (label `spritzwine-local`) whose job container IS the build
+# image (ci/build-env.Dockerfile -> spritzwine-build:fedora44).
+#
+# This replaces .woodpecker.yml, which could never have gone green: it built Wine for both PE
+# arches on a Codeberg HOSTED runner, where a job is capped at 10 minutes (the `-lazy`
+# variants only delay the START of a job, they do not extend its runtime). Its own comment
+# admitted "~30 min". The whole org is on Forgejo Actions and one runner now.
+#
+# On a green build of `rust`, this asks Prater the only question that matters downstream:
+# "does this SpritzWine still build and run as Proton?" -- see the dispatch step.
+
+name: build
+
+on:
+  push:
+    branches: [rust]
+  pull_request:
+  workflow_dispatch:
+
+# One build at a time: they share the persistent work tree under /cache.
+concurrency:
+  group: spritzwine-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: spritzwine-local
+    container:
+      image: spritzwine-build:fedora44
+    env:
+      # /cache is bind-mounted into every job container by the runner (beisl/ci/runner).
+      SRC: /cache/spritzwine/src
+      CARGO_HOME: /cache/cargo
+      CCACHE_DIR: /cache/spritzwine/ccache
+    steps:
+      - name: Sync the persistent work tree
+        # A fresh workspace every job would re-clone wine (a Proton-sized tree) and throw
+        # away the object dirs -- i.e. every build cold, ~30+ min. So the job works in a warm
+        # tree on the cache disk and just moves it to this commit. `reset --hard` keeps the
+        # untracked build outputs and the submodule checkouts; it does not clean.
+        run: |
+          set -eu
+          git config --global --add safe.directory '*'
+          # .gitmodules points wine/ and beisl/ at ssh://git@codeberg.org/... and CI has no
+          # SSH key. Everything here is public: read it over HTTPS instead. (Old commits keep
+          # the ssh URL forever, so this rewrite must live here, not only in .gitmodules.)
+          git config --global url."https://codeberg.org/".insteadOf "ssh://git@codeberg.org/"
+          mkdir -p "$SRC"
+          [ -d "$SRC/.git" ] || git init -q "$SRC"
+          url="$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY"
+          git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_SHA" \
+            || git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_REF"
+          git -C "$SRC" reset -q --hard FETCH_HEAD
+          git -C "$SRC" log -1 --format='building %h %s'
+
+      - name: Assert the build image matches this commit
+        # force_pull is off and the tag is local, so the runner CANNOT know its image is
+        # stale -- and a stale image fails hours later in whatever way the missing package
+        # dictates (the winebus/SDL2 link error took three runs to pin down). The image
+        # bakes its stamp in at build time; this turns "stale image" into a 5-second failure
+        # with instructions.
+        run: |
+          set -eu
+          cd "$SRC"
+          want=$(cat ci/build-env.sha256)
+          have=$(cat /etc/spritzwine/build-env.sha256 2>/dev/null || echo "MISSING (image predates stamp-baking)")
+          if [ "$want" != "$have" ]; then
+            echo "The runner's spritzwine-build:fedora44 image does not match this commit." >&2
+            echo "  repo stamp:  $want" >&2
+            echo "  image stamp: $have" >&2
+            echo "Rebuild it on the runner host from THIS commit:" >&2
+            echo "  ./ci/rebuild.sh   (stamps, builds, verifies the bake, prunes)" >&2
+            exit 1
+          fi
+          echo "image matches: $want"
+
+      - name: Build
+        # build.sh: submodules -> rust crates -> wine configure -> wine -> wine_api.
+        # Incremental thanks to the warm tree + ccache (first on PATH in the image).
+        #
+        # Through ci/quiet.sh: Wine prints one compiler line per file, and thousands of them
+        # bury the only thing a CI log is read for. Full output goes to the cache disk; the
+        # step shows a heartbeat, the phase markers, and -- on failure -- the tail.
+        run: |
+          set -eu
+          mkdir -p "$CARGO_HOME" "$CCACHE_DIR"
+          cd "$SRC"
+          JOBS=$(nproc) ./ci/quiet.sh /cache/spritzwine/build.log ./build.sh
+
+      - name: Package
+        # The relocatable tarball: wine + the Rust unix libs + the installers + beisl.
+        # rm -rf dist: version-named trees otherwise accumulate in the warm tree forever
+        # (package.sh removes only its own), bloating the disk and leaving stale trees for
+        # anything that scans dist/ -- release.yml already clears it.
+        run: cd "$SRC" && rm -rf dist && ./packaging/package.sh
+
+      - name: Smoke
+        # The gate that matters. Wine's configure silently disables backends whose headers
+        # are missing, so this asserts what configure DECIDED (X11/freetype/fontconfig/vulkan
+        # required; audio and Wayland reported), then checks the new-WoW64 shape of the
+        # tarball, boots a fresh prefix, and runs a real PE in both bitnesses.
+        run: cd "$SRC" && ./ci/smoke.sh
+
+      - name: Ask Prater whether this still works as Proton
+        # SpritzWine is upstream of SpritzWine-Prater, which consumes it as a submodule and
+        # builds its wine/. Without this, a wine change lands here and nobody learns it broke
+        # Proton until someone bumps the pin by hand, weeks later.
+        #
+        # Prater's integrate.yml builds + smokes this exact commit and, on green, opens the
+        # `spritzwine: bump to <sha>` PR itself. Fire-and-forget: a red Prater must not turn
+        # a green SpritzWine build red -- the failure shows up on Prater's run, where the
+        # log is.
+        #
+        # TODO(user): secrets.PRATER_DISPATCH_TOKEN -- an access token with Actions write on
+        # SpritzWine-Prater. Without it this step just says so and moves on.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/rust'
+        env:
+          PRATER_DISPATCH_TOKEN: ${{ secrets.PRATER_DISPATCH_TOKEN }}
+        run: |
+          set -eu
+          { test -n "${PRATER_DISPATCH_TOKEN:-}"; } 2>/dev/null || {
+            echo "PRATER_DISPATCH_TOKEN not set -- not asking Prater to integrate $FORGEJO_SHA."
+            echo "Prater's nightly integrate run will pick this up anyway (just later)."
+            exit 0
+          }
+          api="$FORGEJO_SERVER_URL/api/v1/repos/SpritzWine/SpritzWine-Prater"
+          hdr=$(mktemp)
+          # Token via a header FILE: never in argv (ps) and never in an xtrace.
+          { printf 'Authorization: token %s\n' "$PRATER_DISPATCH_TOKEN" > "$hdr"; } 2>/dev/null
+          curl -sf -X POST "$api/actions/workflows/integrate.yml/dispatches" \
+            -H @"$hdr" -H "Content-Type: application/json" \
+            -d "{\"ref\":\"prater\",\"inputs\":{\"sha\":\"$FORGEJO_SHA\"}}" \
+            && echo "asked Prater to integrate $FORGEJO_SHA" \
+            || echo "dispatch failed (token scope? workflow not on prater yet?) -- the nightly will catch it"
+          rm -f "$hdr"
+
+      - name: Summary
+        if: always()
+        run: |
+          cd "$SRC"
+          echo "spritzwine: $(git rev-parse --short HEAD)"
+          echo "wine:       $(git rev-parse --short HEAD:wine 2>/dev/null || echo '?')"
+          ls -l dist/*.tar.xz 2>/dev/null || echo "no tarball (build failed?)"

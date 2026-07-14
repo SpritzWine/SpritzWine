@@ -1,0 +1,123 @@
+# Release: tag `v*` -> build -> package -> smoke -> Codeberg release.
+#
+# Same runner, same scripts as build.yml: the tarball a release publishes is byte-for-byte
+# what `./build.sh && ./packaging/package.sh` makes locally.
+#
+# One-time repo setup on Codeberg:
+#   1. Settings -> Units -> enable Actions.
+#   2. Settings -> Actions -> Secrets -> add RELEASE_TOKEN (access token, repository write).
+#      TODO(user): the automatic Actions token cannot create releases; this secret is required.
+#
+# Cut a release:  git tag v0.2.0 && git push codeberg v0.2.0
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: spritzwine-build
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: spritzwine-local
+    container:
+      image: spritzwine-build:fedora44
+    env:
+      SRC: /cache/spritzwine/src
+      CARGO_HOME: /cache/cargo
+      CCACHE_DIR: /cache/spritzwine/ccache
+    steps:
+      - name: Sync the persistent work tree
+        run: |
+          set -eu
+          git config --global --add safe.directory '*'
+          git config --global url."https://codeberg.org/".insteadOf "ssh://git@codeberg.org/"
+          mkdir -p "$SRC"
+          [ -d "$SRC/.git" ] || git init -q "$SRC"
+          url="$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY"
+          git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_SHA" \
+            || git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_REF"
+          git -C "$SRC" reset -q --hard FETCH_HEAD
+
+      - name: Assert the build image matches this commit
+        # force_pull is off and the tag is local, so the runner CANNOT know its image is
+        # stale -- and a stale image fails hours later in whatever way the missing package
+        # dictates (the winebus/SDL2 link error took three runs to pin down). The image
+        # bakes its stamp in at build time; this turns "stale image" into a 5-second failure
+        # with instructions.
+        run: |
+          set -eu
+          cd "$SRC"
+          want=$(cat ci/build-env.sha256)
+          have=$(cat /etc/spritzwine/build-env.sha256 2>/dev/null || echo "MISSING (image predates stamp-baking)")
+          if [ "$want" != "$have" ]; then
+            echo "The runner's spritzwine-build:fedora44 image does not match this commit." >&2
+            echo "  repo stamp:  $want" >&2
+            echo "  image stamp: $have" >&2
+            echo "Rebuild it on the runner host from THIS commit:" >&2
+            echo "  ./ci/rebuild.sh   (stamps, builds, verifies the bake, prunes)" >&2
+            exit 1
+          fi
+          echo "image matches: $want"
+
+      - name: Build
+        run: |
+          set -eu
+          mkdir -p "$CARGO_HOME" "$CCACHE_DIR"
+          cd "$SRC"
+          JOBS=$(nproc) ./ci/quiet.sh /cache/spritzwine/build.log ./build.sh
+
+      - name: Package
+        run: |
+          set -eu
+          cd "$SRC"
+          rm -rf dist
+          VERSION="$FORGEJO_REF_NAME" ./packaging/package.sh
+          cd dist && sha256sum ./*.tar.xz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Smoke
+        # No unsmoked release. This is the only thing standing between a tag and a tarball
+        # that has no X11 driver, no sound, or no Rust in it -- all of which build green.
+        run: cd "$SRC" && ./ci/smoke.sh
+
+      - name: Publish release
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -eu
+          cd "$SRC"
+          # Token hygiene: it reaches curl through a header FILE, so it is never in argv (ps)
+          # and the lines that expand it swallow their own xtrace.
+          { test -n "${RELEASE_TOKEN:-}"; } 2>/dev/null \
+            || { echo "RELEASE_TOKEN secret is not set" >&2; exit 1; }
+          api="$FORGEJO_SERVER_URL/api/v1/repos/$FORGEJO_REPOSITORY"
+          hdr=$(mktemp)
+          { printf 'Authorization: token %s\n' "$RELEASE_TOKEN" > "$hdr"; } 2>/dev/null
+          # SemVer prereleases: a hyphen in the tag (v0.2.0-rc.1) marks it pre-release.
+          case "$FORGEJO_REF_NAME" in *-*) pre=true ;; *) pre=false ;; esac
+          # The release body records the provenance the tarball is built from: which wine
+          # commit is underneath this SpritzWine.
+          notes=$(printf 'SpritzWine %s (new-WoW64). Extract and run `./spritzwine <program.exe>`.\n\n```\nspritzwine: %s\nwine:       %s\n```\n' \
+                    "$FORGEJO_REF_NAME" \
+                    "$(git rev-parse HEAD)" \
+                    "$(git rev-parse HEAD:wine 2>/dev/null || echo '?')")
+          command -v jq >/dev/null || { dnf install -y -q jq; } >/dev/null 2>&1
+          payload=$(jq -n --arg tag "$FORGEJO_REF_NAME" --arg body "$notes" --argjson pre "$pre" \
+                    '{tag_name:$tag, name:$tag, prerelease:$pre, body:$body}')
+          resp=$(curl -sf -X POST "$api/releases" -H @"$hdr" \
+                   -H "Content-Type: application/json" -d "$payload" \
+                 || curl -sf "$api/releases/tags/$FORGEJO_REF_NAME" -H @"$hdr" || true)
+          id=$(printf '%s' "$resp" | grep -o '"id":[0-9]*' | head -n1 | cut -d: -f2)
+          test -n "$id" \
+            || { echo "could not create or find the release for $FORGEJO_REF_NAME (token scope? API reachable?)" >&2; exit 1; }
+          for f in dist/*.tar.xz dist/SHA256SUMS; do
+            curl -sf -X POST "$api/releases/$id/assets?name=$(basename "$f")" \
+              -H @"$hdr" -F "attachment=@$f" -o /dev/null \
+              || { echo "failed to attach $(basename "$f")" >&2; exit 1; }
+            echo "attached: $(basename "$f")"
+          done
+          rm -f "$hdr"
+          echo "release $FORGEJO_REF_NAME published (prerelease=$pre)"

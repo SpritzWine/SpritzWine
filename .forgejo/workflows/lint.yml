@@ -1,0 +1,95 @@
+# The cheap lane (seconds).
+#
+# Runs on OUR runner, like every other lane in the org -- nothing here depends on Codeberg's
+# hosted capacity. It stays cheap by doing only what needs no build: shell syntax, and the
+# consistency invariants that have actually bitten this project. The real gate (build +
+# smoke) is build.yml.
+#
+# It shares the runner with the heavy lanes, and the runner is `capacity: 1`, so a lint job
+# queues behind a running Wine build instead of racing it for cores. That is the right
+# trade: lint is a gate, not a latency budget.
+
+name: lint
+
+on:
+  push:
+    branches: [rust]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: spritzwine-local
+    container:
+      # A plain debian, not the build image: this lane must stay seconds, and it needs
+      # nothing from the build image. The runner pulls it once and caches it.
+      image: docker.io/library/debian:stable-slim
+    steps:
+      # Not actions/checkout: the runner executes actions INSIDE the job container, and this
+      # image has no node. A checkout is three lines of git.
+      - name: Checkout
+        run: |
+          apt-get -qq update
+          apt-get -qq install -y --no-install-recommends git ca-certificates shellcheck curl >/dev/null
+          url="$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY"
+          git init -q .
+          git fetch -q --depth 1 "$url" "$FORGEJO_SHA" || git fetch -q --depth 1 "$url" "$FORGEJO_REF"
+          git checkout -q FETCH_HEAD
+
+      - name: shellcheck (ours, full severity)
+        run: shellcheck ci/smoke.sh ci/quiet.sh ci/rebuild.sh ci/stamp.sh
+
+      - name: shellcheck (the build scripts, warnings and up)
+        # SC2016 excluded: packaging/package.sh passes a LITERAL '$ORIGIN' to patchelf, which
+        # is exactly right -- the rpath must not be expanded by the shell.
+        run: shellcheck -S warning -e SC2016 build.sh packaging/package.sh packaging/spritzwine relink-ntdll.sh
+
+      - name: submodules must be cloneable without an SSH key
+        # .gitmodules used to point wine/ and beisl/ at ssh://git@codeberg.org/..., which no
+        # CI job and no drive-by contributor can clone. Everything here is public; the URLs
+        # must be https so a plain `git clone --recursive` works for anyone. (Push over SSH
+        # still works -- configure pushInsteadOf locally; see ci/README.md.)
+        run: |
+          if grep -q 'ssh://' .gitmodules; then
+            echo ".gitmodules still has an ssh:// URL -- CI and contributors cannot clone it:" >&2
+            grep -n 'ssh://' .gitmodules >&2
+            exit 1
+          fi
+          echo "submodule URLs are cloneable:"
+          grep -E '^\s*url' .gitmodules
+
+      - name: wine pin sanity
+        # The gitlink must be a commit that actually exists on Codeberg. A pin left behind by
+        # a force-push/rebase still builds from a warm tree and fails only on a cold clone --
+        # i.e. for everyone except the author. Checked over the API rather than by cloning:
+        # the wine repo is far too big for a 5-minute hosted job.
+        run: |
+          pin=$(git rev-parse "HEAD:wine")
+          echo "wine pin: $pin"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://codeberg.org/api/v1/repos/SpritzWine/wine/git/commits/$pin")
+          if [ "$code" != "200" ]; then
+            echo "wine pin $pin does not exist on codeberg.org/SpritzWine/wine (HTTP $code)." >&2
+            echo "Rebased away, or never pushed?" >&2
+            exit 1
+          fi
+          echo "pin exists upstream."
+
+      - name: build image stamp
+        # Catches SAME-COMMIT drift only: the Dockerfile was edited but ci/build-env.sha256
+        # was not regenerated ("you edited one and forgot the other"). A runner image that is
+        # stale relative to the commit is caught by the build jobs' "Assert the build image"
+        # step instead, via the stamp baked into the image. The two are complementary, not
+        # redundant -- the assert cannot catch forgot-to-restamp, because a rebuilt image
+        # bakes the stale stamp right in.
+        run: |
+          want=$(cat ci/build-env.sha256)
+          have=$(./ci/stamp.sh)
+          if [ "$want" != "$have" ]; then
+            echo "The build image changed but ci/build-env.sha256 was not updated." >&2
+            echo "  recorded: $want" >&2
+            echo "  actual:   $have" >&2
+            echo "Run ./ci/rebuild.sh (it re-stamps FIRST, then builds and verifies the bake)" >&2
+            echo "and commit the updated stamp together with the Dockerfile change." >&2
+            exit 1
+          fi
+          echo "build env stamp ok: $have"
