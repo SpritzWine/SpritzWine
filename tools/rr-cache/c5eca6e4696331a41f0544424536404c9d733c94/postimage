@@ -1,0 +1,20 @@
+MODULE    = avrt.dll
+IMPORTLIB = avrt
+IMPORTS   = user32
+
+# MMCSS (AvSetMmThreadCharacteristics & friends) is implemented in Rust: link the
+# no_std PE staticlib libwine_avrt_pe.a (rust/src_dll/avrt_pe) and force its anchor
+# so every export is pulled in -- same scheme as ntdll's libwine_ntdll_pe.a (see
+# configure.ac WINE_RUST_PE_DIR_*). The Get/SetThreadPriority/SetLastError it calls
+# come from kernel32, auto-linked into every PE dll, so IMPORTS needs no change.
+#
+# NB: the tier used to also set `EXTRADLLFLAGS = -Wb,--prefer-native`, carried over
+# from the 11.12 base. Upstream dropped that in 8574997c4c0 ("avrt: No longer prefer
+# native"), and the base wins -- which is what we want anyway: without it Wine prefers
+# the BUILTIN avrt, and the builtin is our Rust. Re-adding it would tell Wine to load a
+# native avrt.dll instead and skip the Rust entirely.
+i386_EXTRADLLFLAGS = -L$(WINE_RUST_PE_DIR_i386) -lwine_avrt_pe -Wl,/include:_wine_avrt_pe_anchor
+x86_64_EXTRADLLFLAGS = -L$(WINE_RUST_PE_DIR_x86_64) -lwine_avrt_pe -Wl,/include:wine_avrt_pe_anchor
+
+SOURCES = \
+	main.c
