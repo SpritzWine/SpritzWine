@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The pour — soda, bases, and two glasses · SpritzWine</title>
+<meta name="description" content="How SpritzWine is actually built: hand-authored soda-* tiers, generated consumer branches, and the two glasses they pour into — spritzwine on upstream Wine (the endeavour) and spritzvalve on Valve's (the necessity that boots the games).">
+<link rel="icon" type="image/png" href="assets/spritzwine.png">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+/* apply a stored theme before first paint to avoid a flash */
+(function () {
+  try {
+    var t = localStorage.getItem("spritzwine-theme");
+    if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="index.html" aria-label="SpritzWine — home">
+      <img src="assets/spritzwine.png" alt="" width="26" height="42">
+      <span class="wordmark">Spr<span class="i">ı<span class="tick" aria-hidden="true"></span></span>tzW<span class="i">ı<span class="tick" aria-hidden="true"></span></span>ne</span>
+    </a>
+    <nav aria-label="Site">
+      <a href="index.html" class="hide-xs">Front page</a>
+      <a href="index.html#shipped" class="hide-sm">What ships</a>
+      <a href="the-pour.html" aria-current="page">The pour</a>
+      <a href="https://codeberg.org/SpritzWine/SpritzWine" rel="external">Source</a>
+      <button id="theme-toggle" class="theme-toggle" type="button">Theme: Auto</button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ======================= PAGE HEAD ======================= -->
+<section class="hero page-head" id="top" aria-label="Introduction">
+  <div class="wrap">
+    <a class="backlink" href="index.html"><span class="arr" aria-hidden="true">←</span> Back to the front page</a>
+    <div class="hero-body">
+      <p class="kicker" style="color: var(--gold-light);">The branch model, in full</p>
+      <h1 class="hero-headline">Soda is the syrup. A consumer is soda plus a base.</h1>
+      <p class="lede">
+        That sentence is lifted straight out of <code>wine/docs/BRANCHING.md</code>, and it
+        is not a joke about drinks. It is the build. The <b>soda-<span aria-hidden="true">*</span></b>
+        tiers carry <em>no Wine of their own</em> — they are flavour, hand-written, one squashed
+        commit each. Pour them onto a Wine tree and you get a branch you can ship. Pour them
+        onto a <em>different</em> Wine tree and you get a different one.
+      </p>
+      <p class="lede">
+        There are two glasses. One of them is the point of the project; the other one is how
+        we prove the first one is safe. Most of this page is about telling them apart.
+      </p>
+      <ul class="toc" aria-label="On this page">
+        <li><a href="#authored">Authored vs. generated</a></li>
+        <li><a href="#tiers">The tiers</a></li>
+        <li><a href="#replay">The replay</a></li>
+        <li><a href="#glasses">The two glasses</a></li>
+        <li><a href="#inside">What is actually Rust</a></li>
+        <li><a href="#base-wins">Where the base wins</a></li>
+        <li><a href="#ledger">Ships today vs. roadmap</a></li>
+        <li><a href="#prater">Where Prater fits</a></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= AUTHORED VS GENERATED ======================= -->
+<section id="authored" aria-labelledby="authored-h">
+  <div class="wrap">
+    <p class="kicker">Two kinds of branch</p>
+    <h2 id="authored-h">One kind you write. One kind you throw away.</h2>
+    <p>
+      Run <code>git branch -a</code> on the Wine fork and it looks like a mess:
+      <code>soda-build</code>, <code>soda-core</code>, <code>soda-glorious</code>,
+      <code>soda-ntdll</code>, <code>soda-branding</code>, <code>soda-demo</code>,
+      <code>spritzvalve</code>, <code>spritzwine</code>, plus upstream’s
+      <code>master</code> and Valve’s <code>proton_*</code>. It isn’t a mess. There are
+      exactly two kinds of branch here, and once you know which is which, everything else
+      follows.
+    </p>
+
+    <div class="claims" role="list">
+      <div class="claim" role="listitem">
+        <b>Authored — the <code>soda-*</code> tiers.</b>
+        Hand-written feature tiers. The source of truth. Each is <em>exactly one squashed
+        commit</em> on its parent — not a topic branch with history. You edit these. Always.
+      </div>
+      <div class="claim" role="listitem">
+        <b>Generated — the consumers.</b>
+        <code>spritzvalve</code> and its siblings are produced mechanically by replaying the
+        tiers onto a Wine base. Never hand-edited, <em>force-pushed on every regeneration</em>.
+        A commit you make here is gone at the next pour.
+      </div>
+      <div class="claim" role="listitem">
+        <b>The metaphor pays rent.</b>
+        The tiers carry no Wine at all. Which Wine you get is decided entirely by the base you
+        pour them onto — and that is why there can be more than one glass without maintaining
+        two forks.
+      </div>
+    </div>
+
+    <p class="aside-note">
+      Same deal as Valve’s own <code>proton_11.0</code>: a rebased result, not a place you
+      commit to.
+    </p>
+  </div>
+</section>
+
+<!-- ======================= THE TIERS ======================= -->
+<section id="tiers" aria-labelledby="tiers-h">
+  <div class="wrap">
+    <p class="kicker">The syrup</p>
+    <h2 id="tiers-h">Six tiers, and a rule for adding a seventh.</h2>
+    <p class="wide-note">
+      Each tier is one commit on top of its parent tier. That <em>is</em> the entire history —
+      <code class="long">git log soda-core</code> against the fork base prints two lines, because
+      <code>soda-core</code> sits on <code>soda-build</code>.
+    </p>
+
+    <div class="card tier-card" tabindex="0">
+      <table class="tier-table">
+        <caption>The tier set (tagged <code>soda-11.12-1</code>, authored on wine&nbsp;11.12)</caption>
+        <thead>
+          <tr>
+            <th scope="col">Tier</th>
+            <th scope="col">Parent</th>
+            <th scope="col">Contents</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><code>soda-build</code></th>
+            <td><span class="muted">fork base</span></td>
+            <td>Rust PE-staticlib build integration: <code>configure.ac</code>, the generated
+              <code>configure</code>, <code>tools/makedep.c</code>,
+              <code>tools/winegcc/winegcc.c</code>. <b>Everything else depends on it.</b></td>
+          </tr>
+          <tr>
+            <th scope="row"><code>soda-core</code></th>
+            <td><code>soda-build</code></td>
+            <td>The <code>HidP_*</code> value engine, the comdlg32 XDG-portal file chooser, avrt
+              MMCSS, the win32u DC-cache bound, hidparse, the wineusb container ID. Lands clean
+              on the Valve base.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>soda-glorious</code></th>
+            <td><code>soda-core</code></td>
+            <td>DualSense/controller Rust: <code>winebus.sys</code> rumble, dinput, mmdevapi
+              endpoint pairing, winexinput.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>soda-ntdll</code></th>
+            <td><code>soda-core</code></td>
+            <td>ntdll Rust: the threadpool, <code>RtlVirtualUnwind2</code>, SEH hardening,
+              battery/LZNT1, plus the wow64 power thunk.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>soda-branding</code></th>
+            <td><code>soda-core</code></td>
+            <td>winecfg strings and icons. Per-consumer — a differently-branded consumer swaps
+              it out.</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>soda-demo</code></th>
+            <td><code>soda-build</code></td>
+            <td>The Rust <code>ping</code> demo and the integration-test harness. Nobody
+              ships this.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="margin-top:38px; font-size:17px;">Why a tier exists at all</h3>
+    <p class="wide-note">
+      A tier is justified by exactly one of two things. <b>A distinct consumer set</b> —
+      <code>soda-branding</code> is separate because another consumer would swap it;
+      <code>soda-demo</code> is separate because no shipping consumer wants it. Or <b>isolating
+      conflict-heavy code</b> — <code>soda-ntdll</code> is separate because ntdll is where a
+      cross-base replay hurts most, and you do not want that landmine sitting under a change to
+      comdlg32.
+    </p>
+    <p class="aside-note">
+      If a change needs neither, squash it into an existing tier. More tiers is not more
+      structure; it is more rebase surface.
+    </p>
+  </div>
+</section>
+
+<!-- ======================= THE REPLAY ======================= -->
+<section id="replay" aria-labelledby="replay-h">
+  <div class="wrap">
+    <p class="kicker">The pour itself</p>
+    <h2 id="replay-h">One script, two glasses.</h2>
+    <p class="wide-note">
+      A consumer is not merged, cherry-picked or maintained. It is <em>replayed</em>:
+      <code class="long">tools/regenerate.sh &lt;out-branch&gt; &lt;wine-base&gt; &lt;soda-tip&gt;</code>
+      checks the output branch out at the soda tip and rebases <em>that</em> branch
+      <code>--onto</code> the Wine base, with <code>git rerere</code> supplying the conflict
+      memory. The tiers themselves never move. Ever.
+    </p>
+
+    <p class="scroll-hint">The figure is wider than a phone — scroll it sideways. Everything in it
+      is written out in the cards below, too.</p>
+    <div class="fig-scroll" tabindex="0" role="group" aria-label="The replay, drawn — scrollable figure">
+      <figure class="pour-fig">
+        <svg viewBox="0 0 920 560" role="img"
+             aria-label="The replay, drawn. On the left, the authored soda tiers: soda-build at the root, soda-core on top of it, and on top of soda-core the three children soda-glorious, soda-ntdll and soda-branding; soda-demo hangs off soda-build. In the middle, tools/regenerate.sh, which rebases the tiers onto a Wine base using git rerere. On the right, two glasses. The upper glass is spritzwine: an outline, not yet poured — the full mix of soda-build, soda-core, soda-glorious, soda-ntdll and soda-branding over an upstream WineHQ Wine base. The lower glass is spritzvalve: filled and shipping — soda-build, soda-core and soda-branding over Valve's proton_11.0 base, tagged spritzvalve-11.0-1, the pin the Prater distribution ships.">
+          <defs>
+            <marker id="ph-arrow" viewBox="0 0 8 8" refX="7" refY="4"
+                    markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 z" class="arrowhead"/>
+            </marker>
+          </defs>
+
+          <!-- ============ left: the authored tiers ============ -->
+          <text class="kick hot" x="4" y="16">Authored · you edit here</text>
+
+          <!-- spines -->
+          <path class="spine" d="M14 58 V 217 M14 81 H 20 M14 217 H 20"/>
+          <path class="spine" d="M30 94 V 181 M30 117 H 36 M30 149 H 36 M30 181 H 36"/>
+
+          <rect class="chip" x="4" y="32" width="184" height="26" rx="7"/>
+          <text class="label" x="14" y="49">soda-build</text>
+
+          <rect class="chip" x="20" y="68" width="168" height="26" rx="7"/>
+          <text class="label" x="30" y="85">soda-core</text>
+
+          <rect class="chip-held" x="36" y="104" width="152" height="26" rx="7"/>
+          <text class="label held" x="46" y="121">soda-glorious</text>
+
+          <rect class="chip-held" x="36" y="136" width="152" height="26" rx="7"/>
+          <text class="label held" x="46" y="153">soda-ntdll</text>
+
+          <rect class="chip" x="36" y="168" width="152" height="26" rx="7"/>
+          <text class="label" x="46" y="185">soda-branding</text>
+
+          <rect class="chip-held" x="20" y="204" width="168" height="26" rx="7"/>
+          <text class="label held" x="30" y="221">soda-demo</text>
+
+          <text class="sub" x="4" y="256">Each tier: exactly one squashed</text>
+          <text class="sub" x="4" y="272">commit on its parent.</text>
+          <text class="sub" x="4" y="296">Dashed = in no published</text>
+          <text class="sub" x="4" y="312">consumer today.</text>
+
+          <!-- ============ middle: the script ============ -->
+          <path class="arrow" d="M196 132 H 224" marker-end="url(#ph-arrow)"/>
+
+          <rect class="box" x="230" y="102" width="140" height="60" rx="10"/>
+          <text class="mono" x="300" y="126" text-anchor="middle">regenerate.sh</text>
+          <text class="mono sm" x="300" y="146" text-anchor="middle">rebase --onto</text>
+
+          <text class="sub" x="300" y="182" text-anchor="middle">git rerere</text>
+          <text class="sub" x="300" y="198" text-anchor="middle">9 recorded</text>
+          <text class="sub" x="300" y="214" text-anchor="middle">resolutions</text>
+
+          <!-- to the upper glass -->
+          <path class="arrow" d="M372 118 C 384 112, 384 108, 394 106" marker-end="url(#ph-arrow)"/>
+          <!-- to the lower glass -->
+          <path class="arrow" d="M372 148 C 390 210, 378 330, 394 372" marker-end="url(#ph-arrow)"/>
+
+          <!-- ============ right, top: spritzwine — the endeavour ============ -->
+          <text class="kick hot" x="410" y="20">The endeavour · not poured yet</text>
+
+          <rect class="band-empty" x="410" y="30" width="500" height="24" rx="3"/>
+          <text class="label" x="422" y="47">soda-branding</text>
+          <rect class="band-empty" x="410" y="56" width="500" height="24" rx="3"/>
+          <text class="label held" x="422" y="73">soda-ntdll</text>
+          <rect class="band-empty" x="410" y="82" width="500" height="24" rx="3"/>
+          <text class="label held" x="422" y="99">soda-glorious</text>
+          <rect class="band-empty" x="410" y="108" width="500" height="24" rx="3"/>
+          <text class="label" x="422" y="125">soda-core</text>
+          <rect class="band-empty" x="410" y="134" width="500" height="24" rx="3"/>
+          <text class="label" x="422" y="151">soda-build</text>
+
+          <rect class="base-empty" x="410" y="162" width="500" height="62" rx="3"/>
+          <text class="label" x="422" y="183">upstream WineHQ wine</text>
+          <text class="sub" x="422" y="201">what Wine is becoming — no Valve patchset,</text>
+          <text class="sub" x="422" y="216">no Proton, no Steam-shaped parts</text>
+
+          <path class="glass-empty" d="M406 26 V 216 a 8 8 0 0 0 8 8 H 906 a 8 8 0 0 0 8 -8 V 26"/>
+
+          <text class="label out" x="406" y="250">spritzwine · the full mix</text>
+          <text class="sub" x="406" y="270">The destination: Rust in Wine for its own sake. Today the branch of that</text>
+          <text class="sub" x="406" y="286">name is still the legacy hand-authored fork — not yet generated from the tiers.</text>
+
+          <!-- ============ right, bottom: spritzvalve — the necessity ============ -->
+          <text class="kick" x="410" y="326">The necessity · in the glass today</text>
+
+          <rect class="soda-3" x="410" y="336" width="500" height="26"/>
+          <text class="label on-soda" x="422" y="354">soda-branding</text>
+          <rect class="soda-2" x="410" y="362" width="500" height="26"/>
+          <text class="label on-soda" x="422" y="380">soda-core</text>
+          <rect class="soda-1" x="410" y="388" width="500" height="26"/>
+          <text class="label on-soda" x="422" y="406">soda-build</text>
+
+          <rect class="wine-base" x="410" y="414" width="500" height="76"/>
+          <text class="label on-wine" x="422" y="438">valve-wine/proton_11.0</text>
+          <text class="sub on-wine-dim" x="422" y="458">Valve’s patchset — WINE_SIMULATE_WRITECOPY and</text>
+          <text class="sub on-wine-dim" x="422" y="474">the rest. The reason anti-tamper titles boot at all.</text>
+
+          <circle class="fizz" cx="700" cy="350" r="3"/>
+          <circle class="fizz" cx="790" cy="374" r="2.2"/>
+          <circle class="fizz" cx="640" cy="398" r="2.6"/>
+          <circle class="fizz" cx="840" cy="400" r="1.8"/>
+          <circle class="fizz" cx="740" cy="424" r="2.4"/>
+
+          <path class="glass-body" d="M406 332 V 482 a 8 8 0 0 0 8 8 H 906 a 8 8 0 0 0 8 -8 V 332"/>
+
+          <text class="label out" x="406" y="516">= spritzvalve-11.0-1 · the thin mix, on purpose</text>
+          <text class="sub" x="406" y="536">Ships today. Prater’s wine submodule is pinned to this tag.</text>
+        </svg>
+        <figcaption>
+          The same syrup, two bases. The full glass is the one that boots games; the outlined
+          one is the one the project is actually for. Nothing in the tiers had to change to
+          get both — that is the entire argument for the machinery.
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="stat-row">
+      <div class="stat">
+        <span class="n">1</span>
+        <span class="t">commit per tier — squashed, never a topic branch with history</span>
+      </div>
+      <div class="stat">
+        <span class="n">9</span>
+        <span class="t">conflict resolutions in the tracked <code>git rerere</code> cache: a
+          cross-base stitch is resolved once by a human, then identically by everyone and by CI</span>
+      </div>
+      <div class="stat">
+        <span class="n">0</span>
+        <span class="t">lines of Wine in the soda tiers. They are flavour; the base is the drink</span>
+      </div>
+    </div>
+
+    <p class="status-note" style="margin-top:30px;">
+      Two traps are baked into that rebase, and <code>BRANCHING.md</code> spells both out. The
+      exclusive start of the replayed range is the <em>soda home base</em> — the parent of the
+      fork’s first commit — <b>not</b> a <code>merge-base</code>, which would sit down around
+      wine 11.0 and replay the entire 11.0→11.12 upstream range onto Valve’s tree. And you
+      rebase the <em>output</em> branch, never the tier: if the tiers move, every other
+      consumer’s replay silently changes and the rerere cache stops matching.
+    </p>
+  </div>
+</section>
+
+<!-- ======================= THE TWO GLASSES ======================= -->
+<section id="glasses" aria-labelledby="glasses-h">
+  <div class="wrap">
+    <p class="kicker">The heart of it</p>
+    <h2 id="glasses-h">One glass is the endeavour. The other is the means.</h2>
+    <p class="wide-note">
+      It is easy to read the repository and get this backwards, because the branch that
+      <em>ships</em> is <code>spritzvalve</code> and the branch that ships is the one you can
+      download. But shipping is not the same as being the point. <b>spritzvalve is the vehicle
+      that proves the Rust doesn’t break real games. SpritzWine is the thing being proven.</b>
+    </p>
+
+    <div class="glasses">
+      <article class="card glass-card is-endeavour">
+        <p class="role">The endeavour</p>
+        <h3>spritzwine</h3>
+        <p>
+          The tiers poured over <b>upstream WineHQ Wine</b>. No Valve patchset, no Proton, no
+          Steam-shaped parts — Rust in Wine for its own sake, tracking what Wine is
+          <em>becoming</em> rather than what Valve froze.
+        </p>
+        <p class="recipe">
+          <span class="base">upstream wine</span> + build + core + glorious + ntdll + branding
+        </p>
+        <p>
+          This is where the <em>fuller</em> mix lives, and where fixing plain software counts as
+          much as fixing games: the battery and power reporting in <code>soda-ntdll</code> exists
+          because Windows programs ask how much charge is left and Wine had no good answer. No
+          frametime was harmed or improved.
+        </p>
+        <p class="foot">
+          <span class="pill">Roadmap</span>&nbsp; The branch carrying this name today is still the
+          original hand-authored pre-Valve fork on vanilla wine 11.12
+          (<code>wine-11.12-136</code>) — the tree the tiers were <em>carved out of</em>, not yet
+          a tier-generated consumer. Say it plainly: the generated <code>spritzwine</code> does
+          not exist yet.
+        </p>
+      </article>
+
+      <article class="card glass-card">
+        <p class="role">The necessity</p>
+        <h3>spritzvalve</h3>
+        <p>
+          The same tiers poured over <b>Valve’s Proton Wine</b> (<code>proton_11.0</code>). It
+          exists because the project’s real gate is not a test suite — it is
+          <em>does the game boot?</em> — and games need Valve’s patchset:
+          <code class="long">WINE_SIMULATE_WRITECOPY</code> for anti-tamper, and the rest of it.
+        </p>
+        <p class="recipe">
+          <span class="base">proton_11.0</span> + build + core + branding
+        </p>
+        <p>
+          It carries the <em>thin</em> mix on purpose. Avatar: Frontiers of Pandora crashed at
+          ~13 seconds on the vanilla-Wine fork; on the Valve base it plays. Rebasing onto
+          <code>proton_11.0</code> inherits Valve’s entire patchset for free — chasing individual
+          Proton hacks one at a time was the alternative, and it is a losing game.
+        </p>
+        <p class="foot">
+          <span class="pill ships">Ships today</span>&nbsp; Tagged
+          <code>spritzvalve-11.0-1</code> (<code>8c00a2018</code>,
+          <code>wine-11.0-1193</code>). Boots Avatar: Frontiers of Pandora, Risk of Rain 2 and
+          Watch Dogs: Legion. It is what SpritzWine-Prater is built from.
+        </p>
+      </article>
+    </div>
+
+    <p class="aside-note" style="margin-top:30px;">
+      Two prepositions, one field: <code>-11.0-</code> on a consumer means “replayed <em>onto</em>
+      that base”; <code>-11.12-</code> on the tier set means “authored <em>on</em> that base.”
+      The asymmetry is not a typo. It is the whole model, made visible in a tag.
+    </p>
+  </div>
+</section>
+
+<!-- ======================= WHAT IS ACTUALLY RUST ======================= -->
+<section id="inside" aria-labelledby="inside-h">
+  <div class="wrap">
+    <p class="kicker">In the shipping pin</p>
+    <h2 id="inside-h">Four DLLs. That is the whole of it.</h2>
+    <p class="wide-note">
+      Not what is <em>written</em> — what is in the Wine you get. In
+      <code>spritzvalve-11.0-1</code>, exactly four Wine DLLs link Rust:
+      <code>avrt</code> (MMCSS), <code>comdlg32</code> (the XDG-portal file chooser),
+      <code>hid</code> (the <code>HidP_*</code> value engine) and <code>hidparse.sys</code>
+      (the HID report-descriptor parser). <code>ntdll</code> and <code>winebus.sys</code> link
+      <b>no</b> Rust in that pin. The held-back tiers really are held back.
+    </p>
+
+    <div class="codeblock" style="margin-top:26px;" tabindex="0">
+<pre><code><span class="c"># the question, answered by the tree rather than by a web page:</span>
+<span class="cmd">git grep -l lwine_ <span class="hl">spritzvalve-11.0-1</span> -- 'dlls/*/Makefile.in'</span>
+
+dlls/avrt/Makefile.in
+dlls/comdlg32/Makefile.in
+dlls/hid/Makefile.in
+dlls/hidparse.sys/Makefile.in</code></pre>
+    </div>
+
+    <p style="margin-top:26px;" class="wide-note">
+      Two of the four are literally “parse a byte blob a USB device handed you, and index into
+      it.” That is not a coincidence, and it is not where you land if the goal is
+      <em>Rust everywhere</em> — it is where you land if the goal is <em>fewer bugs</em>.
+      What replacing those two parsers costs, in lines, against the Valve base:
+    </p>
+
+    <div class="card tier-card" tabindex="0">
+      <table class="tier-table">
+        <caption>Deleting C, against <code>valve-wine/proton_11.0</code></caption>
+        <thead>
+          <tr>
+            <th scope="col">File</th>
+            <th scope="col">Delta</th>
+            <th scope="col">What moved to Rust</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><code>dlls/hid/hidp.c</code></th>
+            <td><code>−980 / +127</code></td>
+            <td>the <code>HidP_*</code> value engine — extracting fields out of report buffers</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>dlls/hidparse.sys/main.c</code></th>
+            <td><code>−529 / +11</code></td>
+            <td>the HID report-descriptor parser — a driver, kernel-pool backed</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="cov-hint">
+        The C that remains is the bridge. The Rust lives outside the Wine tree entirely, under
+        <code>rust/</code> in the superproject — the Wine fork carries only build glue and the
+        C-side seams. That split is what makes a tier pourable in the first place.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= WHERE THE BASE WINS ======================= -->
+<section class="interlude" aria-labelledby="base-wins-h">
+  <div class="wrap">
+    <p class="kicker" id="base-wins-h">The stitch</p>
+    <blockquote class="quote">Where the base and a tier disagree, the base wins.</blockquote>
+    <p class="attrib">
+      The tiers were authored on wine <b>11.12</b>. Valve ships on wine <b>11.0</b>, and there is
+      no newer base inside the Proton 11 cycle — Valve is not going to hand you one. So the
+      shipping consumer is 11.12-authored tiers replayed <em>backwards</em> onto an 11.0 tree.
+      That is not an accident waiting to be cleaned up. It is the steady state.
+    </p>
+  </div>
+</section>
+
+<section id="base-wins" aria-labelledby="asym-h">
+  <div class="wrap">
+    <div class="split">
+      <div>
+        <p class="kicker">The asymmetry is real</p>
+        <h2 id="asym-h">This is where the work actually happens.</h2>
+        <p>
+          Where upstream Wine moved on between 11.0 and 11.12, the tier’s version of a file is
+          <em>stale</em>, and the correct resolution is Valve’s. Valve’s
+          <code>dlls/ntdll/Makefile.in</code> still imports <code>$(TOMCRYPT_PE_LIBS)</code> and
+          links <code>$(UNWIND_LIBS)</code>, where upstream had already switched to symcrypt and
+          dropped libunwind. Valve’s <code>virtual_unwind()</code> takes an extra argument that
+          does not exist in 11.12 at all.
+        </p>
+        <p>
+          Each of those is a decision made during the replay, in favour of the base. The replay
+          exists <em>precisely so that asymmetry never has to be “fixed.”</em> A one-off rebase
+          would have to be redone, by hand, forever. A script with a tracked
+          <code>rr-cache</code> is resolved once.
+        </p>
+      </div>
+      <div class="card-grid" style="grid-template-columns:1fr; margin-top:0;">
+        <div class="card">
+          <h3>Why a stable base, not a moving one</h3>
+          <p>
+            Oxidation on a base that already works means that when a game breaks, the answer is
+            <em>“our Rust broke it.”</em> Oxidise on a moving base and every regression comes with
+            a free debate about whether Wine moved under you — and you spend the project
+            bisecting somebody else’s tree.
+          </p>
+        </div>
+        <div class="card">
+          <h3>And why the fork is built to peel off</h3>
+          <p>
+            The Rust work is kept as clean, replayable tiers precisely so it <em>can</em> be
+            lifted onto a different Wine base. That is not a promise about the future — it is
+            what the current replay already does, and a rehearsal for whatever base comes next.
+            The base and the changes never grow into each other.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= THE LEDGER ======================= -->
+<section id="ledger" aria-labelledby="ledger-h">
+  <div class="wrap">
+    <p class="kicker">Scrupulously, today</p>
+    <h2 id="ledger-h">What ships, what doesn’t, and what is only a plan.</h2>
+    <p class="wide-note">
+      This project has publicly retracted a bug it had misdiagnosed. The same standard applies to
+      its own architecture: a page that describes the model as if it were finished would be
+      lying. Here is the state of the pour, as of this writing.
+    </p>
+
+    <dl class="ledger card" style="padding-inline: clamp(22px, 3.5vw, 36px);">
+      <div>
+        <dt>Ships today</dt>
+        <dd>
+          <b><code>spritzvalve-11.0-1</code></b> — commit <code>8c00a2018</code>,
+          <code>wine-11.0-1193</code>. Generated from <code>soda-build + soda-core +
+          soda-branding</code> onto <code>valve-wine/proton_11.0</code>. Prater’s
+          <code>wine</code> submodule is pinned to that tag. Boots Avatar: Frontiers of Pandora,
+          Risk of Rain 2, Watch Dogs: Legion.
+        </dd>
+      </div>
+      <div>
+        <dt>Written, not shipped</dt>
+        <dd>
+          <b><code>soda-ntdll</code> and <code>soda-glorious</code></b> — the threadpool,
+          <code>RtlVirtualUnwind2</code>/SEH, LZNT1, battery reporting, DualSense rumble. Written,
+          building, tested — and in <em>no published consumer</em>. They ship when they pass the
+          boot gate, not when they compile. An untested consumer sitting on a remote is an
+          invitation for somebody to pin it, and then you own it.
+        </dd>
+      </div>
+      <div>
+        <dt>Roadmap</dt>
+        <dd>
+          <b>The generated <code>spritzwine</code> consumer does not exist yet.</b> The branch
+          carrying that name is the original hand-authored pre-Valve fork on vanilla wine 11.12
+          (<code>wine-11.12-136</code>) — it predates the model this page describes. The target
+          recipe is <code>build + core + glorious + ntdll + branding</code> on an upstream base.
+          It is a plan, not a shipped thing.
+        </dd>
+      </div>
+      <div>
+        <dt>Not negotiable</dt>
+        <dd>
+          <b>Tag every consumer you pin, and pin the tag.</b> Consumers are force-pushed; a
+          gitlink pinning a raw consumer SHA breaks the moment the branch is regenerated — the
+          old commit falls out of the branch’s history and <code>git submodule update</code> dies
+          with <code class="long">Fetched in submodule path 'wine', but it did not contain &lt;sha&gt;</code>. A tag is a ref, and a ref keeps the commit reachable forever.
+        </dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<!-- ======================= WHERE PRATER FITS ======================= -->
+<section id="prater" aria-labelledby="prater-h">
+  <div class="wrap">
+    <p class="kicker">Downstream</p>
+    <h2 id="prater-h">Where Prater fits.</h2>
+    <div class="split">
+      <div>
+        <p>
+          <b>Prater</b> — the Wiener Prater, the great public park and funfair, the place you
+          actually go to <em>play</em> — is the distribution you install: the Proton fork, where
+          the games are. It is not a fourth kind of branch. It is a <em>consumer of a consumer</em>:
+          Prater’s <code>wine</code> submodule is pinned to the <code>spritzvalve-11.0-1</code>
+          tag, and everything on this page happens upstream of it.
+        </p>
+        <p>
+          Which is why <code>spritzvalve</code> exists at all. Prater is where the boot gate is
+          held — Avatar, Risk of Rain 2, Watch Dogs: Legion — and a gate you cannot reach is a
+          gate you cannot pass. The Valve base is how the Rust gets to stand in front of a real
+          game and be judged.
+        </p>
+        <p class="muted">
+          Wine is <em>not</em> Proton: Proton is the whole compatibility tool — Wine plus DXVK,
+          vkd3d, the Steam bridge, the launch script. What we take from Valve is the Wine
+          underneath it. Our answer to <em>Proton</em> is Prater.
+        </p>
+      </div>
+      <div class="card">
+        <h3 style="font-size:17px;">The pin chain, top to bottom</h3>
+        <ul class="entry-list" style="margin-top:14px;">
+          <li><span class="ctx">soda-*</span>
+            <span>authored tiers, on a wine-11.12 fork base. Tagged <code>soda-11.12-1</code>.</span></li>
+          <li><span class="ctx">regenerate.sh</span>
+            <span>replays them <code>--onto</code> a Wine base, with <code>rerere</code>.</span></li>
+          <li><span class="ctx">spritzvalve</span>
+            <span>the generated consumer. Tagged <code>spritzvalve-11.0-1</code>.</span></li>
+          <li><span class="ctx">SpritzWine</span>
+            <span>the superproject — pins the consumer + the Rust workspace.</span></li>
+          <li><span class="ctx">Prater</span>
+            <span>the Proton distribution. Pins the superproject’s output. This is the download.</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= CLOSING ======================= -->
+<section class="family" aria-labelledby="closing-h">
+  <div class="wrap">
+    <p class="kicker" id="closing-h">And that is the pour</p>
+    <p class="muted" style="max-width:64ch;">
+      Soda is the syrup; a consumer is soda plus a base. One glass holds still so the games can
+      prove the Rust safe. The other one is what the Rust is actually <em>for</em>. Nobody has to
+      choose between them, because the tiers were never wine to begin with.
+    </p>
+    <div class="footer-back" style="justify-content:center;">
+      <a class="btn btn-primary" href="index.html" style="background:var(--accent); color:var(--on-accent);">← Back to the front page</a>
+      <a class="btn btn-ghost" href="https://codeberg.org/SpritzWine/SpritzWine" rel="external"
+         style="border-color:var(--hair); color:var(--ink);">Read <code style="background:none;padding:0;color:inherit;">docs/BRANCHING.md</code></a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap cols">
+    <img class="glass-icon" src="assets/spritzwine.png" alt="The SpritzWine glass" width="44" height="72">
+    <div>
+      <span class="wordmark">Spr<span class="i">ı<span class="tick" aria-hidden="true"></span></span>tzW<span class="i">ı<span class="tick" aria-hidden="true"></span></span>ne</span>
+      — sanely adding value to Wine, leveraging Rust.
+      <p class="fine">
+        Free software for Linux. LGPL-2.1-or-later; Wine is © its authors.
+        <a href="index.html">Front page</a> ·
+        <a href="https://codeberg.org/SpritzWine/SpritzWine" rel="external">Source</a> ·
+        <a href="https://codeberg.org/SpritzWine/SpritzWine/issues" rel="external">Issues</a> ·
+        <a href="https://codeberg.org/SpritzWine/SpritzWine/releases" rel="external">Releases</a> ·
+        <a href="https://codeberg.org/SpritzWine/SpritzWine-Prater" rel="external">Prater</a> ·
+        <a href="https://codeberg.org/SpritzWine/beisl" rel="external">beisl</a>
+      </p>
+    </div>
+    <span class="easter" lang="de-AT" aria-hidden="true">Man bringe den Spritzwein!</span>
+  </div>
+</footer>
+
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpritzWine — sanely adding value to Wine, leveraging Rust</title>
+<meta name="description" content="SpritzWine integrates Rust into Wine — targeted, modular, proven on real games. The superproject: the Wine fork, the Rust workspace, and the tooling that ties them together.">
+<link rel="icon" type="image/png" href="assets/spritzwine.png">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+/* apply a stored theme before first paint to avoid a flash */
+(function () {
+  try {
+    var t = localStorage.getItem("spritzwine-theme");
+    if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+})();
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="#top" aria-label="SpritzWine — home">
+      <img src="assets/spritzwine.png" alt="" width="26" height="42">
+      <span class="wordmark">Spr<span class="i">ı<span class="tick" aria-hidden="true"></span></span>tzW<span class="i">ı<span class="tick" aria-hidden="true"></span></span>ne</span>
+    </a>
+    <nav aria-label="Site">
+      <a href="#approach" class="hide-sm">The approach</a>
+      <a href="#architecture" class="hide-sm">Architecture</a>
+      <a href="#shipped" class="hide-xs">What ships</a>
+      <a href="the-pour.html" class="hide-sm">The pour</a>
+      <a href="#get" class="hide-sm">Get it</a>
+      <a href="#notes" class="hide-sm">Release notes</a>
+      <a href="https://codeberg.org/SpritzWine/SpritzWine" rel="external">Source</a>
+      <button id="theme-toggle" class="theme-toggle" type="button">Theme: Auto</button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- HERO -->
+<section class="hero" id="top" aria-label="Introduction">
+  <canvas id="hero-bubbles" aria-hidden="true"></canvas>
+  <div class="wrap">
+    <div class="hero-lockup">
+      <img class="glass" src="assets/spritzwine.png" alt="" width="220" height="360">
+      <div class="hero-body">
+        <h1 class="hero-headline">Sanely adding value to Wine, leveraging Rust.</h1>
+        <p class="lede">
+          A <em>G’spritzter</em> is wine cut with soda — same wine, just easier to
+          get along with. SpritzWine is that, for the other Wine: take the Wine your
+          games already run on, mix in <b>Rust</b> exactly where the C has been quietly
+          ruining afternoons — parsers, descriptors, unwinders — and leave the rest
+          in peace.
+        </p>
+        <p class="lede">
+          This is the <b>superproject</b> — where the Wine fork and the Rust workspace
+          are developed together. Not what you install to play a game: that is
+          <a class="hero-link" href="https://codeberg.org/SpritzWine/SpritzWine-Prater" rel="external">Prater</a>.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="#approach">The approach</a>
+          <a class="btn btn-ghost" href="https://codeberg.org/SpritzWine/SpritzWine" rel="external">Source on Codeberg</a>
+          <code class="hero-cmd"><span class="prompt">The gate:</span> does the game boot?</code>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- THE APPROACH -->
+<section id="approach" aria-labelledby="approach-h">
+  <div class="wrap">
+    <p class="kicker">The approach</p>
+    <h2 id="approach-h">Think big, act small.</h2>
+    <p>
+      The ambition is real: Wine is a thirty-year-old C codebase, and large parts
+      of it are exactly the kind of code that benefits from stronger guarantees —
+      parsing untrusted bytes, walking descriptors, unwinding stacks. There is value
+      on the table.
+    </p>
+    <p>
+      The method is deliberately unambitious. Start where it brings real value in
+      safety, performance or correctness — one subsystem at a time, each one shipped
+      and proven on real games. A subsystem is not converted until it is <em>pure</em>;
+      it is converted until the remaining C has stopped being a problem. Then you
+      leave, and go find the next place where the bugs actually live.
+    </p>
+    <p class="muted">
+      Nobody upstream asked for any of this, and nobody’s inbox is being campaigned
+      at. The code sits here — LGPL, working, played on — and if a piece proves
+      itself and somebody wants it, it’s theirs. Demonstrating beats lobbying.
+    </p>
+
+    <div class="claims" role="list">
+      <div class="claim" role="listitem">
+        <b>Rust is a means, not the goal.</b>
+        This is not “rewrite Wine in Rust.” Nobody needs that, and nobody would
+        finish it. Rust goes where C is genuinely hurting.
+      </div>
+      <div class="claim" role="listitem">
+        <b>Prove it where it hurts.</b>
+        The destination is upstream Wine. But the proving ground is Valve’s tree —
+        the only one anti-tamper titles boot on — so that is what ships first.
+      </div>
+      <div class="claim" role="listitem">
+        <b>Games are the test suite.</b>
+        Wine’s conformance tests are necessary and not sufficient. The gate is a
+        game booting, not a suite passing.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture" aria-labelledby="arch-h">
+  <div class="wrap">
+    <div>
+        <p class="kicker">Under the hood</p>
+        <h2 id="arch-h">Soda in, spritzer out.</h2>
+        <p>
+          The Rust code lives <em>outside</em> the Wine tree. Wine’s
+          <code>configure.ac</code> finds the crates via
+          <code>$SPRITZWINE_RUST_DIR</code>; the Wine fork carries only build glue
+          and the C-side bridges. That split is the load-bearing one.
+        </p>
+        <p>
+          The fork itself is <em>generated</em>, not hand-maintained: the changes are
+          authored once as thematic <code>soda-*</code> tiers and replayed onto a
+          stable Wine base to produce a consumer branch. Where the two disagree, the
+          base wins. The fork is designed to be peeled off.
+        </p>
+      </div>
+
+      <figure class="arch-fig arch-fig-wide">
+        <svg viewBox="0 0 880 322" role="img"
+             aria-label="How a consumer branch is poured. On the left, five authored soda tiers: soda-build, soda-core, soda-branding, soda-ntdll and soda-glorious. An arrow labelled replay --onto points to two glasses. The first, SpritzWine, is the endeavour: an upstream WineHQ base with all five tiers poured on top, drawn with a dashed outline because it has not been regenerated from the tiers yet. The second, spritzvalve, is the necessity: Valve&#39;s proton_11.0 base carrying only soda-build, soda-core and soda-branding. It is solid because it ships today, and it is the pin the Prater distribution is built from.">
+          <defs>
+            <marker id="arrowhead" viewBox="0 0 8 8" refX="7" refY="4"
+                    markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 z" class="arrowhead"/>
+            </marker>
+          </defs>
+
+          <!-- the tiers, as authored -->
+          <text class="kick" x="2" y="16">The tiers · authored</text>
+          <rect class="chip" x="2" y="30" width="176" height="24" rx="7"/>
+          <text class="label" x="12" y="46">soda-build</text>
+          <rect class="chip" x="2" y="60" width="176" height="24" rx="7"/>
+          <text class="label" x="12" y="76">soda-core</text>
+          <rect class="chip" x="2" y="90" width="176" height="24" rx="7"/>
+          <text class="label" x="12" y="106">soda-branding</text>
+          <rect class="chip" x="2" y="120" width="176" height="24" rx="7"/>
+          <text class="label" x="12" y="136">soda-ntdll</text>
+          <rect class="chip" x="2" y="150" width="176" height="24" rx="7"/>
+          <text class="label" x="12" y="166">soda-glorious</text>
+          <text class="sub" x="2" y="196">The syrup. Carries no Wine of</text>
+          <text class="sub" x="2" y="212">its own — authored once, then</text>
+          <text class="sub" x="2" y="228">poured into either glass.</text>
+
+          <!-- the pour -->
+          <text class="sub" x="232" y="112" text-anchor="middle">replay --onto</text>
+          <path class="arrow" d="M190 124 H 272" marker-end="url(#arrowhead)"/>
+
+          <!-- glass 1: SpritzWine, the endeavour -->
+          <text class="kick" x="285" y="16">The endeavour</text>
+          <g class="band-planned">
+            <rect class="soda-3" x="287" y="40" width="266" height="26"/>
+            <text class="label on-soda" x="299" y="58">soda-branding</text>
+            <rect class="soda-5" x="287" y="68" width="266" height="26"/>
+            <text class="label on-soda" x="299" y="86">soda-ntdll</text>
+            <rect class="soda-4" x="287" y="96" width="266" height="26"/>
+            <text class="label on-soda" x="299" y="114">soda-glorious</text>
+            <rect class="soda-2" x="287" y="124" width="266" height="26"/>
+            <text class="label on-soda" x="299" y="142">soda-core</text>
+            <rect class="soda-1" x="287" y="152" width="266" height="26"/>
+            <text class="label on-soda" x="299" y="170">soda-build</text>
+            <rect class="wine-base-up" x="287" y="180" width="266" height="72"/>
+            <text class="label on-wine" x="299" y="204">winehq/wine</text>
+            <text class="sub on-wine-dim" x="299" y="226">Upstream — what Wine is becoming,</text>
+            <text class="sub on-wine-dim" x="299" y="242">not what it froze.</text>
+          </g>
+          <circle class="fizz" cx="520" cy="58" r="2.6"/>
+          <circle class="fizz" cx="470" cy="104" r="2"/>
+          <circle class="fizz" cx="534" cy="146" r="2.2"/>
+          <path class="glass-planned" d="M287 36 V 244 a 8 8 0 0 0 8 8 H 545 a 8 8 0 0 0 8 -8 V 36"/>
+          <text class="label goal" x="287" y="276">= spritzwine</text>
+          <text class="sub" x="287" y="296">The full mix, on upstream Wine. The point of</text>
+          <text class="sub" x="287" y="312">the whole exercise — and not poured yet.</text>
+
+          <!-- glass 2: spritzvalve, the necessity -->
+          <text class="kick" x="592" y="16">The necessity</text>
+          <rect class="soda-3" x="594" y="96" width="266" height="26"/>
+          <text class="label on-soda" x="606" y="114">soda-branding</text>
+          <rect class="soda-2" x="594" y="124" width="266" height="26"/>
+          <text class="label on-soda" x="606" y="142">soda-core</text>
+          <rect class="soda-1" x="594" y="152" width="266" height="26"/>
+          <text class="label on-soda" x="606" y="170">soda-build</text>
+          <rect class="wine-base" x="594" y="180" width="266" height="72"/>
+          <text class="label on-wine" x="606" y="204">valve-wine/proton_11.0</text>
+          <text class="sub on-wine-dim" x="606" y="226">Valve&#39;s patched Wine — the reason</text>
+          <text class="sub on-wine-dim" x="606" y="242">anti-tamper titles boot at all.</text>
+          <circle class="fizz" cx="826" cy="112" r="2.6"/>
+          <circle class="fizz" cx="782" cy="150" r="2"/>
+          <path class="glass-body" d="M594 36 V 244 a 8 8 0 0 0 8 8 H 852 a 8 8 0 0 0 8 -8 V 36"/>
+          <text class="label out" x="594" y="276">= spritzvalve-11.0-1</text>
+          <text class="sub" x="594" y="296">The thin mix, on Valve&#39;s Wine. Ships today —</text>
+          <text class="sub" x="594" y="312">the pin the Prater distribution is built from.</text>
+        </svg>
+        <figcaption>
+          One syrup, two glasses. <strong>SpritzWine</strong> is the endeavour: the full mix over
+          upstream Wine. <strong>spritzvalve</strong> is what makes it provable — Valve&#39;s tree is
+          the only one anti-tamper titles boot on, and a game booting is this project&#39;s real test
+          suite. So the vehicle ships first; the destination is the point.
+          <a href="the-pour.html">The long version →</a>
+        </figcaption>
+      </figure>
+  </div>
+</section>
+
+<!-- WHAT SHIPS -->
+<section id="shipped" aria-labelledby="shipped-h">
+  <div class="wrap">
+    <p class="kicker">What ships today</p>
+    <h2 id="shipped-h">The current pour.</h2>
+    <p>
+      Not everything written is wired in — the tier decides what lands in a consumer.
+      The current pin (<code>spritzvalve-11.0-1</code> = build + core + branding)
+      links Rust into these:
+    </p>
+
+    <div class="card tier-card">
+      <table class="tier-table">
+        <caption>In the glass right now</caption>
+        <thead>
+          <tr><th scope="col">Module</th><th scope="col">What’s in Rust</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><code>hidparse.sys</code></th>
+            <td>the HID report-descriptor parser — a driver, kernel-pool backed</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>hid.dll</code></th>
+            <td>the <code>HidP_*</code> value engine — extracting fields out of report buffers</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>avrt.dll</code></th>
+            <td>MMCSS — thread scheduling classes</td>
+          </tr>
+          <tr>
+            <th scope="row"><code>comdlg32.dll</code></th>
+            <td>the file chooser, via the XDG desktop portal — WoW64-thunked, so 32-
+              and 64-bit apps both get it</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="cov-hint">
+        Two of those four are literally “parse a byte blob a USB device handed you and
+        index into it,” and a third is a protocol client. That is not a coincidence —
+        it is where you land when the goal is <em>fewer bugs</em>, not <em>more Rust</em>.
+      </p>
+    </div>
+
+    <p class="aside-note">
+      The threadpool, the SEH unwinder, LZNT1 compression, battery reporting and
+      DualSense rumble exist too — written, building, deliberately not shipped.
+      Code that isn’t proven on a real game stays in the workshop.
+    </p>
+
+    <p class="muted small">
+      <code class="long">grep -l lwine_ dlls/*/Makefile.in</code> in the wine tree answers
+      this question for whatever you have checked out. Trust that over this table.
+    </p>
+  </div>
+</section>
+
+<!-- QUOTE -->
+<section class="interlude" aria-labelledby="quote-h">
+  <div class="wrap">
+    <p class="kicker" id="quote-h">The house toast</p>
+    <blockquote class="quote" lang="de-AT">„Man bringe den Spritzwein!“</blockquote>
+    <p class="attrib">
+      — Michael Häupl, Mayor &amp; Governor of Vienna (1994–2018). Take the work
+      seriously, take yourself a good deal less so, and there is always time for a
+      <em>G’spritzter</em>.
+    </p>
+  </div>
+</section>
+
+<!-- GET IT -->
+<section id="get" aria-labelledby="get-h">
+  <div class="wrap install-grid">
+    <div>
+      <p class="kicker">Which glass do you want</p>
+      <h2 id="get-h">Pour it yourself.</h2>
+      <ul class="entry-list">
+        <li><span class="ctx">To play games</span>
+          <span><a href="https://codeberg.org/SpritzWine/SpritzWine-Prater" rel="external">Prater</a>
+            — the Proton distribution. That is the download.</span></li>
+        <li><span class="ctx">To trace one</span>
+          <span><a href="https://codeberg.org/SpritzWine/beisl" rel="external">beisl</a>
+            — the performance tracer. Wine-agnostic on purpose.</span></li>
+        <li><span class="ctx">To hack on it</span>
+          <span>this repo — the Wine fork, the Rust workspace, the pins.</span></li>
+      </ul>
+      <p class="status-note">
+        The default branch is <code>rust</code>; there is no <code>main</code>. The
+        supported environment is the Fedora dev container under
+        <code>.devcontainer/</code> — Rust toolchain, the
+        <code class="long">{i686,x86_64}-pc-windows-gnullvm</code> targets, clang, lld
+        and libclang, preconfigured. Everything is LGPL-2.1-or-later: cherry-pick it
+        freely, no permission needed. Source and issues at
+        <a href="https://codeberg.org/SpritzWine/SpritzWine" rel="external">codeberg.org/SpritzWine/SpritzWine</a>.
+      </p>
+    </div>
+    <div class="codeblock">
+      <button id="copy-cmd" class="copy-btn" type="button"
+              aria-label="Copy the clone command">Copy</button>
+<pre><code><span class="c"># the superproject: the wine fork + the rust workspace</span>
+<span class="cmd">git clone --recursive \
+  https://codeberg.org/SpritzWine/<span class="hl">SpritzWine</span>.git</span>
+
+<span class="c"># one-shot: wine (new-WoW64, graphical) + the crates</span>
+<span class="cmd">./build.sh</span>
+
+<span class="c"># -&gt; a relocatable tarball, installer inside</span>
+<span class="cmd">./packaging/package.sh</span>
+
+<span class="c"># what is really Rust in the tree you have:</span>
+<span class="cmd">grep -l lwine_ wine/dlls/*/Makefile.in</span></code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- RELEASE NOTES -->
+<section id="notes" aria-labelledby="notes-h">
+  <div class="wrap">
+    <p class="kicker">Fresh from the cellar</p>
+    <h2 id="notes-h">Release notes.</h2>
+    <div id="release-notes" class="release-notes card">
+      <!-- site.js replaces this with releasenotes.md (same-origin fetch, relative
+           path). Under file:// — or if the fetch fails — this fallback stays. -->
+      <p>Read the current
+        <a href="https://codeberg.org/SpritzWine/SpritzWine/releases"
+           rel="external">release notes on Codeberg</a>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- FAMILY -->
+<section class="family" aria-labelledby="family-h">
+  <div class="wrap">
+    <p class="kicker" id="family-h">The house</p>
+    <div class="sibs" aria-label="The Viennese family: SpritzWine, Prater, and Beisl">
+      <span class="self wordmark">Spr<span class="i">ı<span class="tick" aria-hidden="true"></span></span>tzW<span class="i">ı<span class="tick" aria-hidden="true"></span></span>ne</span>
+      <span class="dotsep" aria-hidden="true">◆</span>
+      <span class="other">Prater</span>
+      <span class="dotsep" aria-hidden="true">◆</span>
+      <span class="other sib-beisl wordmark">be<span class="i">ı<span class="tick" aria-hidden="true"></span></span>sl</span>
+    </div>
+    <p class="muted">
+      Three Viennese siblings, one joke: the drink, the funfair, the pub. The
+      superproject that mixes Rust into Wine, the Proton distribution you install to
+      play, and the tracer that vets the frametimes — anyone’s frametimes, ours
+      included.
+    </p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap cols">
+    <img class="glass-icon" src="assets/spritzwine.png" alt="The SpritzWine glass" width="44" height="72">
+    <div>
+      <span class="wordmark">Spr<span class="i">ı<span class="tick" aria-hidden="true"></span></span>tzW<span class="i">ı<span class="tick" aria-hidden="true"></span></span>ne</span>
+      — sanely adding value to Wine, leveraging Rust.
+      <p class="fine">
+        Free software for Linux. LGPL-2.1-or-later; Wine is © its authors.
+        <a href="https://codeberg.org/SpritzWine/SpritzWine" rel="external">Source</a> ·
+        <a href="https://codeberg.org/SpritzWine/SpritzWine/issues" rel="external">Issues</a> ·
+        <a href="https://codeberg.org/SpritzWine/SpritzWine/releases" rel="external">Releases</a> ·
+        <a href="https://codeberg.org/SpritzWine/SpritzWine-Prater" rel="external">Prater</a> ·
+        <a href="https://codeberg.org/SpritzWine/beisl" rel="external">beisl</a>
+      </p>
+    </div>
+    <span class="easter" lang="de-AT" aria-hidden="true">Man bringe den Spritzwein!</span>
+  </div>
+</footer>
+
+<script src="assets/site.js"></script>
+</body>
+</html>
