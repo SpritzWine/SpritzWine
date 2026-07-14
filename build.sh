@@ -46,6 +46,22 @@ cd "$ROOT/wine"
 [ -f include/wine/vulkan.h ] || (cd dlls/winevulkan && python3 ./make_vulkan)
 ./tools/make_specfiles syscalls
 ./tools/make_requests
+# The Makefile-vs-configure gate below is tree-internal: it catches a changed TREE, not a
+# changed ENVIRONMENT. That bit us: SDL2-devel was added to the CI image, and the warm CI
+# tree kept a config.h with no SONAME_LIBSDL2 -- winebus.so failed to link while "skipping
+# configure" scrolled past, forever, no matter how often the image was rebuilt. So the
+# environment is fingerprinted too: the CI image bakes its stamp at /etc/spritzwine (see
+# ci/build-env.Dockerfile), the repo's ci/build-env.sha256 is the fallback signal outside
+# a container. A forced configure is cheap when nothing effective changed: config.status
+# leaves an identical config.h untouched, so no rebuild cascades.
+ENV_STAMP=""
+for f in /etc/spritzwine/build-env.sha256 "$ROOT/ci/build-env.sha256"; do
+    if [ -f "$f" ]; then ENV_STAMP=$(cat "$f"); break; fi
+done
+if [ -n "$ENV_STAMP" ] && [ "$(cat .build-env-stamp 2>/dev/null || true)" != "$ENV_STAMP" ]; then
+    echo "    build environment changed (or is unstamped) -> forcing configure"
+    rm -f Makefile
+fi
 if [ -f Makefile ] && [ Makefile -nt configure ]; then
     echo "    wine/Makefile is up to date; skipping configure."
 else
@@ -53,6 +69,8 @@ else
     # shellcheck disable=SC2086
     ./configure $CONFIGURE_FLAGS
 fi
+# Record which environment this configure ran in (set -e means we only get here on success).
+[ -z "$ENV_STAMP" ] || printf '%s\n' "$ENV_STAMP" > .build-env-stamp
 
 echo "==> [3/6] Building the standalone per-dll Rust crates (libwine_ntdll, …)"
 # Zero Wine dependencies, so these build first and get linked into ntdll.
@@ -84,12 +102,12 @@ for pe_target in i686-pc-windows-gnullvm x86_64-pc-windows-gnullvm; do
     done
 done
 
-echo "==> [4/6] Building Wine's dlls and headers (generates headers; links libwine_ntdll into ntdll)"
+echo "==> [4/6] Building Wine (headers, dlls, programs; links libwine_ntdll into ntdll)"
 cd "$ROOT/wine"
 make -j"$JOBS" -C include
 # Each PE Rust staticlib is linked into its module via EXTRADLLFLAGS, which makedep
 # does NOT track as a prerequisite. Drop a stale PE image when its staticlib is newer,
-# so `make dlls` relinks instead of silently keeping the old code (the same gotcha
+# so the build below relinks instead of silently keeping the old code (the same gotcha
 # relink-ntdll.sh handles for the quick dev loop). The crate <name>_pe (from either
 # tree) maps to a Wine module by name alone: a user DLL lives in dlls/<name>/ and
 # builds <name>.dll, while a driver/exe lives in dlls/<name>.<ext>/ and builds
@@ -119,7 +137,16 @@ for arch in i386 x86_64; do
         fi
     done
 done
-make -j"$JOBS" dlls
+# NOT `make dlls`: Wine's Makefile has no such target. Its phony targets are per-module
+# (dlls/ntdll/all, ...), and `dlls` is merely an existing DIRECTORY -- so `make dlls` prints
+# "Nothing to be done for 'dlls'." and silently builds nothing. That went unnoticed for as
+# long as this script existed, because on a tree that had been built before, step 5 found the
+# ntdll.so an earlier `make` had left behind. On a COLD tree (CI, or a new contributor) it
+# does not exist, and step 5 dies linking the Rust `wine` bin: undefined __wine_dbg_output.
+#
+# So build Wine for real here. Nothing in Wine links wine_api (see step 5), so there is no
+# circular dependency and the full build is safe this early; step 6 then finishes in seconds.
+make -j"$JOBS"
 
 echo "==> [5/6] Building the Rust FFI library (wine_api) against the fresh headers"
 cd "$ROOT/rust"
@@ -130,7 +157,7 @@ cd "$ROOT/rust"
 # compiling against the fresh headers.
 cargo build --release
 
-echo "==> [6/6] Building the rest of Wine (programs + loader)"
+echo "==> [6/6] Finishing the Wine build (a no-op unless step 5 changed something)"
 cd "$ROOT/wine"
 make -j"$JOBS"
 
