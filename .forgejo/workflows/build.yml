@@ -50,8 +50,11 @@ jobs:
           mkdir -p "$SRC"
           [ -d "$SRC/.git" ] || git init -q "$SRC"
           url="$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY"
-          git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_SHA" \
-            || git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_REF"
+          # --force on --tags: release tags (spritzwine-11.0-3, v*) get re-cut/force-moved, and
+          # a plain `fetch --tags` REFUSES to clobber the persistent tree's old tag (exit 1),
+          # failing the whole Sync under set -e. Force-update tags to match the remote.
+          git -C "$SRC" fetch -q --tags --force "$url" "$FORGEJO_SHA" \
+            || git -C "$SRC" fetch -q --tags --force "$url" "$FORGEJO_REF"
           git -C "$SRC" reset -q --hard FETCH_HEAD
           git -C "$SRC" log -1 --format='building %h %s'
 

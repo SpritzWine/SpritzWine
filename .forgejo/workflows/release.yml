@@ -38,8 +38,8 @@ jobs:
           mkdir -p "$SRC"
           [ -d "$SRC/.git" ] || git init -q "$SRC"
           url="$FORGEJO_SERVER_URL/$FORGEJO_REPOSITORY"
-          git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_SHA" \
-            || git -C "$SRC" fetch -q --tags "$url" "$FORGEJO_REF"
+          git -C "$SRC" fetch -q --tags --force "$url" "$FORGEJO_SHA" \
+            || git -C "$SRC" fetch -q --tags --force "$url" "$FORGEJO_REF"
           git -C "$SRC" reset -q --hard FETCH_HEAD
 
       - name: Assert the build image matches this commit
