@@ -34,7 +34,14 @@ JOBS="${JOBS:-$(nproc)}"
 CONFIGURE_FLAGS="${CONFIGURE_FLAGS:---enable-archs=i386,x86_64}"
 
 echo "==> [1/6] Fetching the Wine submodule"
-git submodule update --init --recursive
+# --force: the warm wine tree carries GENERATED files that step 2 regenerates -- `configure`
+# (autoreconf), server_protocol.h (make_requests), the vulkan/syscall thunks (make_vulkan /
+# make_specfiles). Some the base tracks, some it doesn't. When the wine PIN moves to a
+# different base, a plain `submodule update` cannot check out over them ("would be overwritten
+# by checkout" -> fatal). checkout -f overwrites exactly those colliding files and leaves
+# unrelated untracked build outputs (*.o) alone, so the warm build survives and step 2
+# regenerates what it discarded.
+git submodule update --init --recursive --force
 
 echo "==> [2/6] Configuring Wine"
 cd "$ROOT/wine"
