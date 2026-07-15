@@ -8,13 +8,17 @@
 #   2. Settings -> Actions -> Secrets -> add RELEASE_TOKEN (access token, repository write).
 #      TODO(user): the automatic Actions token cannot create releases; this secret is required.
 #
-# Cut a release:  git tag v0.2.0 && git push codeberg v0.2.0
+# Cut a release:  git tag spritzwine-11.0-3 && git push codeberg spritzwine-11.0-3
+#                  (or a v* SemVer tag; -alpha/-beta/-rc anywhere marks a pre-release)
 
 name: release
 
 on:
   push:
-    tags: ["v*"]
+    # The release scheme IS the family scheme: spritzwine-<base>-<version>. v* kept for the
+    # legacy SemVer tags. Pre-release is by identifier (alpha/beta/rc), not by the hyphen in
+    # the version -- see the Publish step -- so spritzwine-11.0-3 is a FINAL release.
+    tags: ["spritzwine-*", "v*"]
 
 concurrency:
   group: spritzwine-build
