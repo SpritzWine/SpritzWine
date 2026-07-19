@@ -1,0 +1,43 @@
+[package]
+name = "sodactl-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# NO tokio here, deliberately -- the mirror image of sodactl-mcp's rmcp
+# quarantine, in the other direction: that crate confines an SDK, this one
+# refuses a runtime. The refresh model is one std::thread + mpsc +
+# event::poll(100ms) (see worker.rs): a ~0.8 s *synchronous* reconcile gains
+# nothing from an async executor, and the template event loops that want one
+# (tokio::select! over tick/render channels, bracketed paste) exist to serve
+# features this dashboard does not have. `sodactl-cli` depends on tokio solely
+# to drive the MCP transport; that must not leak here through convenience.
+#
+# crossterm is reached ONLY through re-exports (`ratatui::crossterm`,
+# `crokey::crossterm`) -- both name the same 0.29, so the lock holds ONE copy.
+# A direct dependency would let the versions drift apart on an upgrade and
+# break `KeyCombination::from(KeyEvent)` at the type level, in a way a caret
+# bump would not surface until the event loop stopped matching keys.
+[dependencies]
+sodactl-core = { path = "../sodactl-core" }
+sodactl-git = { path = "../sodactl-git" }
+# default-features = false: 0.30 made termwiz AND termina default backends,
+# which silently doubles the dependency surface (91 -> 182 crates) for two
+# backends nothing here selects. Measured in docs/sodactl-tui-reuse.md.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+# Both tree panes (findings, tier graph). Selection is an identifier PATH, not
+# an index -- the abort class tui-widget-list 0.15.3 ships (stale index into a
+# shrunk list) is deleted by the data model, not worked around.
+tui-tree-widget = "0.24.0"
+# `git log --graph --color=always` -> ratatui Text: git renders its own merge
+# lanes, so there is no lane-layout code to own and nothing to drift from what
+# git thinks the history is.
+ansi-to-tui = "8.0.1"
+# Keybindings: compile-checked `key!(...)` match arms, and Stage 7 renders the
+# help overlay from the same table the event loop matches on.
+crokey = "1.4.0"
+anyhow.workspace = true
+
+[dev-dependencies]
+# Snapshot review over TestBackend buffers (first used in Stage 3).
+insta = "1.48"

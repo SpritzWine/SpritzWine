@@ -1,0 +1,5 @@
+---
+source: crates/sodactl-tui/src/app.rs
+expression: "footer_frame(&app, 60).backend()"
+---
+"0 blocker, 0 drift, 1 hygiene  |  ⠋ reconciling  |  ? help  "

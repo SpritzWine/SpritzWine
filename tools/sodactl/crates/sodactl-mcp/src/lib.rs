@@ -51,9 +51,14 @@
 //! real derived schemas on local types.
 
 pub mod ctx;
-pub mod explain;
-pub mod graph;
 pub mod rr;
+
+// `explain` (the CATALOGUE) and `graph` (the tier DAG) moved to `sodactl-core`
+// so the TUI can reach them without linking rmcp and a tokio runtime. Re-exported
+// here rather than deleted: every existing `sodactl_mcp::graph::` path -- and
+// this crate's own tool bodies -- keep compiling, and the one-schema-N-surfaces
+// rule keeps holding because it is still the same module underneath.
+pub use sodactl_core::{explain, graph};
 
 use std::sync::Arc;
 

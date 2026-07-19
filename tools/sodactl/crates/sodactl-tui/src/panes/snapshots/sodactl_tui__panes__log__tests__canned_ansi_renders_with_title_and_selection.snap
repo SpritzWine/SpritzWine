@@ -1,0 +1,14 @@
+---
+source: crates/sodactl-tui/src/panes/log.rs
+expression: "draw(&mut pane, &Ok(v)).backend()"
+---
+"┌graph / [log]─────────────────────────────────────────────────┐"
+"│soda-ntdll  (soda-core..soda-ntdll)                           │"
+"│* commit aaaaaaaa94d5eb2f423a1d194ce67dae0f5db878             │"
+"│|     ntdll: port the alert path                              │"
+"│* commit bbbbbbbb0714b716e10742250037ce0797712d9c             │"
+"│                                                              │"
+"│                                                              │"
+"│                                                              │"
+"│                                                              │"
+"└──────────────────────────────────────────────────────────────┘"

@@ -1,0 +1,14 @@
+---
+source: crates/sodactl-tui/src/panes/findings.rs
+expression: "draw(&mut pane, &r).backend()"
+---
+"┌findings──────────────────────────────────────┐"
+"│▼ BLOCKER (1)                                 │"
+"│    [ ] PINNED_CONSUMER_UNTAGGED spritzwine   │"
+"│▼ DRIFT (2)                                   │"
+"│    [ ] STITCH_STALE soda-all                 │"
+"│    [ ] TIER_CHILD_STALE soda-ntdll           │"
+"│▼ hygiene (1)                                 │"
+"│    [ ] RR_NO_POSTIMAGE rr/cafe               │"
+"│                                              │"
+"└──────────────────────────────────────────────┘"

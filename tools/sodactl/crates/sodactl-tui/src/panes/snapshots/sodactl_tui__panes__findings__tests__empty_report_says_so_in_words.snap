@@ -1,0 +1,14 @@
+---
+source: crates/sodactl-tui/src/panes/findings.rs
+expression: "draw(&mut pane, &r).backend()"
+---
+"┌findings──────────────────────────────────────┐"
+"│no findings -- the workspace reconciles clean │"
+"│                                              │"
+"│                                              │"
+"│                                              │"
+"│                                              │"
+"│                                              │"
+"│                                              │"
+"│                                              │"
+"└──────────────────────────────────────────────┘"

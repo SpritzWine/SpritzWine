@@ -1,0 +1,28 @@
+---
+source: crates/sodactl-tui/src/panes/help.rs
+expression: term.backend()
+---
+"                                                                                "
+"                                                                                "
+"        ┌help──────────────────────────────────────────────────────────┐        "
+"        │        Up / k  move up                                       │        "
+"        │      Down / j  move down                                     │        "
+"        │          Left  close the selected tree group                 │        "
+"        │         Right  open the selected tree group                  │        "
+"        │         Space  tick/untick the selected finding              │        "
+"        │         Enter  findings/graph: jump the log; log: inspect    │        "
+"        │           Tab  cycle focus: findings -> graph -> log         │        "
+"        │             r  refresh (reconcile + re-derive the log)       │        "
+"        │        Ctrl-z  suspend to the shell (fg resumes)             │        "
+"        │   ? / Shift-?  toggle this help                              │        "
+"        │    q / Ctrl-c  quit                                          │        "
+"        │                                                              │        "
+"        │any other key closes this help                                │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        └──────────────────────────────────────────────────────────────┘        "
+"                                                                                "
+"                                                                                "

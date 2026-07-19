@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sodactl_core::checks::{Policy, Workspace};
-use sodactl_core::{finding::Severity, reconcile_workspace, Manifest, RrSurvey};
+use sodactl_core::{finding::Severity, present, reconcile_workspace, Manifest, RrSurvey};
 use sodactl_git::{Differential, GitCli, GitGix, GitHybrid, GitRead as _};
 use std::path::PathBuf;
 
@@ -39,6 +39,8 @@ enum Cmd {
     },
     /// The rerere cache: which entries can actually help, and which re-prompt forever.
     RrHealth,
+    /// The failure-path dashboard: findings, tier graph, commit chain.
+    Tui,
     /// Serve the read-only MCP surface over stdio (for Claude Code et al).
     ///
     /// STDOUT IS THE PROTOCOL from here on. Nothing else may write to it -- a
@@ -108,12 +110,7 @@ fn selfcheck_differential(manifest: &std::path::Path) -> Result<bool> {
     let text = std::fs::read_to_string(manifest)
         .with_context(|| format!("reading manifest {}", manifest.display()))?;
     let m = Manifest::parse(&text).context("parsing manifest")?;
-    let root = manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."))
-        .to_path_buf();
+    let root = sodactl_core::workspace_root(manifest);
     let wine = root.join(&m.repo.wine);
     let policy = Policy::from_manifest(&m);
 
@@ -134,7 +131,7 @@ fn selfcheck_differential(manifest: &std::path::Path) -> Result<bool> {
         wine_path: m.repo.wine.clone(),
     };
     reconcile_workspace(&m, &d_wine, &ws, &policy).context("reconcile through the differential")?;
-    sodactl_mcp::graph::tier_graph(&m, &d_wine).context("tier graph through the differential")?;
+    sodactl_core::graph::tier_graph(&m, &d_wine).context("tier graph through the differential")?;
 
     // Directed probes, wine side. The absent-ref name is chosen to be
     // unambiguous in a repo with 6697 real refs.
@@ -182,22 +179,10 @@ fn run(cli: Cli) -> Result<()> {
         .with_context(|| format!("reading manifest {}", cli.manifest.display()))?;
     let m = Manifest::parse(&text).context("parsing manifest")?;
 
-    // The manifest sits in the superproject; wine is relative to it.
-    //
-    // The `.filter(|p| !p.as_os_str().is_empty())` is not defensive noise, it is
-    // the whole reason the DEFAULT invocation works. `Path::new("tools/sodactl.toml")
-    // .parent()` is `"tools"` and *its* parent is `Some("")` -- not `None`. So the
-    // `unwrap_or(".")` never fired, `root` became the empty path, and every
-    // `Command::current_dir("")` failed with a bare ENOENT. `sodactl status` from
-    // the repo root -- the one invocation the docs give -- crashed, and only an
-    // absolute `--manifest` ever worked.
-    let root = cli
-        .manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."))
-        .to_path_buf();
+    // The manifest sits in the superproject; wine is relative to it. The
+    // derivation lives in core (`workspace_root`) with the story of the
+    // empty-`parent()` bug that makes its filter load-bearing.
+    let root = sodactl_core::workspace_root(&cli.manifest);
     let wine = root.join(&m.repo.wine);
     // The hybrid backend: gix answers 18 methods, the binary keeps `status`
     // and `missing_by_patch_id` -- see `sodactl_git::gix_backend` for the seam
@@ -226,6 +211,15 @@ fn run(cli: Cli) -> Result<()> {
             .enable_all()
             .build()?
             .block_on(async move { sodactl_mcp::serve_stdio(manifest).await });
+    }
+
+    // And `tui`, for the same reason as `mcp`: no reconcile here. Its worker
+    // thread re-derives state on every refresh (startup, `r`, terminal focus),
+    // because a dashboard rendering a startup snapshot forever would
+    // confidently describe a repository that has since moved -- and git is the
+    // live authority.
+    if matches!(cli.cmd, Cmd::Tui) {
+        return sodactl_tui::run(cli.manifest.clone());
     }
 
     // Two repositories, because the pin is a fact about the superproject and
@@ -267,7 +261,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         // Handled above, before the reconcile cost (Selfcheck in `main`).
-        Cmd::RrHealth | Cmd::Mcp | Cmd::Selfcheck { .. } => unreachable!(),
+        Cmd::RrHealth | Cmd::Mcp | Cmd::Tui | Cmd::Selfcheck { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -366,10 +360,6 @@ fn parse_severity(s: &str) -> Result<Severity> {
     })
 }
 
-fn short(o: &Option<String>) -> String {
-    o.as_deref().map(|s| s[..s.len().min(11)].to_string()).unwrap_or_else(|| "-".into())
-}
-
 fn render_status(r: &sodactl_core::Report) {
     println!("TIERS");
     println!(
@@ -377,27 +367,17 @@ fn render_status(r: &sodactl_core::Report) {
         "branch", "commit", "parent", "commits", "vs remote", "on parent tip"
     );
     for t in &r.tiers {
-        // Ahead AND behind is a restack, and its remedy is a FORCE push -- a
-        // column showing only `ahead` renders a diverged tier as merely
-        // unpushed and sends the reader into a rejected `git push`.
-        let remote = match (t.ahead_of_remote, t.behind_remote) {
-            (Some(0), Some(0)) => "=".to_string(),
-            (Some(a), Some(b)) => format!("+{a}/-{b}"),
-            (Some(a), None) => format!("+{a}/?"),
-            _ => "-".to_string(),
-        };
+        // The cells live in `sodactl_core::present` so the TUI shows the exact
+        // same strings -- including `remote_cell`'s diverged form, whose
+        // rationale (force push, not `git push`) is documented there.
         println!(
             "  {:<16} {:<12} {:<16} {:>7}  {:<9} {}",
             t.name,
-            short(&t.oid),
+            present::short_opt(&t.oid),
             t.parent,
             t.commits_on_parent.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
-            remote,
-            match t.contains_parent_tip {
-                Some(true) => "yes",
-                Some(false) => "NO -- stale",
-                None => "?",
-            }
+            present::remote_cell(t.ahead_of_remote, t.behind_remote),
+            present::parent_tip_cell(t.contains_parent_tip)
         );
     }
 
@@ -407,53 +387,21 @@ fn render_status(r: &sodactl_core::Report) {
         "branch", "commit", "base", "soda tip", "current", "pin (gitlink)"
     );
     for c in &r.consumers {
-        // `current` is deliberately not a boolean with a default. A consumer is
-        // a CROSS-BASE replay, so patch-id equivalence against the soda tip is
-        // not evidence either way -- conflict resolution and binary_resolution
-        // legitimately change the diff. Without a generation ledger the honest
-        // answer is "unknown", and printing "no" would be a fabrication.
+        // `current_cell`'s "unknown" and `pin_cell`'s STAGED form carry the
+        // honest-tri-state and gitlink-beside-tip reasoning; see `present`.
         println!(
             "  {:<16} {:<12} {:<28} {:<12} {:<10} {}",
             c.name,
-            short(&c.oid),
+            present::short_opt(&c.oid),
             c.base,
             c.soda_tip,
-            match c.current {
-                Some(true) => "yes",
-                Some(false) => "STALE",
-                None => "unknown",
-            },
-            render_pin(c)
+            present::current_cell(c.current),
+            present::pin_cell(&c.pin)
         );
     }
 
     println!();
     render_findings(r);
-}
-
-/// The gitlink, shown next to the branch tip because they are different commits
-/// BY DESIGN -- consumers are force-pushed and a local tip routinely runs ahead
-/// of its tag. Any reader eyeballing a pin finding needs to see both or they
-/// cannot tell a true positive from the tool reading the wrong subject.
-fn render_pin(c: &sodactl_core::finding::ConsumerState) -> String {
-    use sodactl_git::Pin;
-    match &c.pin {
-        None => "-".into(),
-        Some(Pin::Unknown { reason }) => format!("UNKNOWN ({reason})"),
-        Some(Pin::Known { committed, staged }) => {
-            let head = committed.as_deref().map(shorten).unwrap_or_else(|| "none".into());
-            match staged {
-                Some(s) if Some(s) != committed.as_ref() => {
-                    format!("{head} (STAGED {})", shorten(s))
-                }
-                _ => head,
-            }
-        }
-    }
-}
-
-fn shorten(s: &str) -> String {
-    s[..s.len().min(11)].to_string()
 }
 
 fn render_findings(r: &sodactl_core::Report) {

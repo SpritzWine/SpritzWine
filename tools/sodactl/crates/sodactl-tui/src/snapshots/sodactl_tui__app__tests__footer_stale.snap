@@ -1,0 +1,5 @@
+---
+source: crates/sodactl-tui/src/app.rs
+expression: term.backend()
+---
+"0 blocker, 0 drift, 1 hygiene  |  REFRESH FAILED -- showing last good state: wine gitdir vanished  |  ? help  "

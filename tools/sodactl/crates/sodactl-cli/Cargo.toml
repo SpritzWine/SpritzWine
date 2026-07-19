@@ -16,6 +16,10 @@ sodactl-git = { path = "../sodactl-git" }
 # crate -- the CLI only reaches the `serve_stdio` entry point, and depends on
 # tokio solely to drive it.
 sodactl-mcp = { path = "../sodactl-mcp" }
+# The TUI is a subcommand for the same one-binary reason; its stack (ratatui
+# and friends -- and the deliberate ABSENCE of tokio, see its Cargo.toml) stays
+# quarantined there. The CLI reaches exactly one `run` entry point.
+sodactl-tui = { path = "../sodactl-tui" }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde_json.workspace = true

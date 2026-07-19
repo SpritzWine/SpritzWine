@@ -193,3 +193,47 @@ impl Manifest {
             .collect()
     }
 }
+
+/// The superproject root, derived from where the manifest sits
+/// (`<root>/tools/sodactl.toml` -- two `parent()` hops up).
+///
+/// This existed twice in `sodactl-cli` and the TUI would have been the third
+/// copy; a third copy of a subtle path derivation is how one of them quietly
+/// loses the filter below.
+///
+/// The `.filter(|p| !p.as_os_str().is_empty())` is not defensive noise, it is
+/// the whole reason the DEFAULT invocation works. `Path::new("tools/sodactl.toml")
+/// .parent()` is `"tools"` and *its* parent is `Some("")` -- not `None`. So the
+/// `unwrap_or(".")` never fired, `root` became the empty path, and every
+/// `Command::current_dir("")` failed with a bare ENOENT. `sodactl status` from
+/// the repo root -- the one invocation the docs give -- crashed, and only an
+/// absolute `--manifest` ever worked.
+pub fn workspace_root(manifest: &std::path::Path) -> std::path::PathBuf {
+    manifest
+        .parent()
+        .and_then(|p| p.parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf()
+}
+
+#[cfg(test)]
+mod workspace_root_tests {
+    use super::workspace_root;
+    use std::path::Path;
+
+    /// The paid-for case: the documented relative default must yield `.`,
+    /// never the empty path.
+    #[test]
+    fn relative_default_yields_dot() {
+        assert_eq!(workspace_root(Path::new("tools/sodactl.toml")), Path::new("."));
+    }
+
+    #[test]
+    fn absolute_yields_grandparent() {
+        assert_eq!(
+            workspace_root(Path::new("/repo/tools/sodactl.toml")),
+            Path::new("/repo")
+        );
+    }
+}

@@ -1,0 +1,18 @@
+---
+source: crates/sodactl-tui/src/panes/graph.rs
+expression: "draw(&mut pane, &snap).backend()"
+---
+"┌[graph] / log─────────────────────────────────────────────────────────────────────┐"
+"│▼ home base  1bb0da91a5e  test fixture home base                                  │"
+"│  ▼ soda-build  22222222222  2 own  on tip: yes                                   │"
+"│    ▼ soda-core  55555555555  5 own  NO -- stale                                  │"
+"│        soda-ntdll  33333333333  3 own  STALE (inherited)                         │"
+"│▼ stitches (1)                                                                    │"
+"│    soda-all  <- soda-core  [soda-ntdll]                                          │"
+"│▼ consumers (1)                                                                   │"
+"│    spritzwine  d3902a7f753  pin e3a386db584 (STAGED 39fe08f1bef)  STALE          │"
+"│                                                                                  │"
+"│                                                                                  │"
+"│                                                                                  │"
+"│                                                                                  │"
+"└──────────────────────────────────────────────────────────────────────────────────┘"

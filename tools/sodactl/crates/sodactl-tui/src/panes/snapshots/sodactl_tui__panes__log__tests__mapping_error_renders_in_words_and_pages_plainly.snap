@@ -1,0 +1,14 @@
+---
+source: crates/sodactl-tui/src/panes/log.rs
+expression: "draw(&mut pane, &Ok(v)).backend()"
+---
+"┌graph / [log]─────────────────────────────────────────────────┐"
+"│soda-ntdll  (soda-core..soda-ntdll)                           │"
+"│mapping failed: 1 vs 2 commits (--graph pass vs %H pass) -- se│"
+"│* some line                                                   │"
+"│* another                                                     │"
+"│                                                              │"
+"│                                                              │"
+"│                                                              │"
+"│                                                              │"
+"└──────────────────────────────────────────────────────────────┘"

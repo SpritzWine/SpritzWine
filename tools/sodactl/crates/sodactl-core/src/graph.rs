@@ -19,9 +19,9 @@
 //! live, because a geometry constant in a config file is a lie waiting to happen
 //! while a destructive operation depends on it.
 
+use crate::Manifest;
 use anyhow::Result;
 use serde::Serialize;
-use sodactl_core::Manifest;
 use sodactl_git::GitRead;
 
 #[derive(Debug, Serialize)]

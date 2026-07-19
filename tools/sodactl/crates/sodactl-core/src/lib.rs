@@ -6,8 +6,11 @@
 //!   3. ledger   -- what happened. A claim to be verified, never a fact. (v3)
 
 pub mod checks;
+pub mod explain;
 pub mod finding;
+pub mod graph;
 pub mod manifest;
+pub mod present;
 pub mod reconcile;
 pub mod rrcache;
 pub mod tags;
@@ -15,7 +18,7 @@ pub mod tags;
 pub use checks::{Policy, SkewPolicy, Workspace};
 pub use sodactl_git::{GitCli, GitRead};
 pub use finding::{Finding, Report, Severity};
-pub use manifest::Manifest;
+pub use manifest::{workspace_root, Manifest};
 pub use reconcile::{reconcile, reconcile_workspace};
 pub use rrcache::{RrEntry, RrSurvey};
 pub use tags::TagName;

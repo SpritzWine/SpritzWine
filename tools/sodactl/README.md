@@ -105,6 +105,93 @@ blockers with it. So documented-normal states (a consumer tip ahead of its tag, 
 local-only stitch) are Hygiene, and states that merely *would* break if you
 committed them are Drift.
 
+## The TUI
+
+```sh
+sodactl --manifest tools/sodactl.toml tui
+```
+
+A dashboard for the **failure path**: the same reconcile the CLI runs, arranged
+so you can see where to do what next. It is exactly as read-only as the rest of
+the tool — a source-grep guardrail test pins every subprocess in the crate to
+two audited read-only constructors (`git log` for the chain, `git`/`tig show`
+for inspection), so a third spawn site anywhere fails the build.
+
+### Panes
+
+```
+┌ findings (35%) ──┬ [graph] / log (tabs, right top) ──┐
+│ ▼ DRIFT (14)     │ tier tree  /  commit chain        │
+│   [ ] PIN_…      ├ detail (right bottom) ────────────┤
+│   [x] TIER_…     │ summary / remedy / catalogue      │
+├──────────────────┴───────────────────────────────────┤
+│ counts | reconciling ⠋ / refreshed Ns ago / ?  help  │
+```
+
+* **findings** — the report grouped by severity, worst first, worst finding
+  pre-selected on startup.
+* **graph** — the modelled topology: home base → tiers by parent edge, with
+  stitches and consumers as sibling groups (replayed artifacts, not
+  descendants). Stale markers distinguish the direct offender (`NO -- stale`)
+  from inheritance (`STALE (inherited)`), and a consumer's STAGED pin
+  divergence is visible in-tree. Orphan tiers (typo'd parent, cycle) render at
+  top level with the reason in words rather than vanishing.
+* **log** — the commit chain via `git log --graph`, context-scoped: Overview is
+  every modelled ref since the home base; selecting a tier narrows to its own
+  commits (`own_limit..tier` — own commits, **not** ancestry), a stitch to
+  `base_tier..name`, a consumer to `base..name`. Enter on a finding whose
+  subject is a modelled ref jumps the log to that context.
+* **detail** — follows the focused pane: finding → summary, the remedy as a
+  set-off copy-paste line, and the catalogue prose (a missing catalogue entry
+  renders an explicit "no catalogue entry" line, never a silent omission);
+  tier/consumer → the same cells the CLI tables print, plus the restack order
+  verbatim; commit → oid and what Enter will open.
+
+### Keys
+
+One static table drives both the event loop and the `?` overlay, so help
+structurally cannot drift from the bindings. `↑/k` `↓/j` move, `←/→`
+close/open groups, `Space` ticks, `Enter` jumps/inspects, `Tab` cycles focus,
+`r` refreshes, `Ctrl-Z` suspends (`fg` resumes), `?` help, `q`/`Ctrl-C` quit.
+
+### Refresh model
+
+Refresh is **manual (`r`) plus terminal focus-gain** — no polling. A worker
+thread re-reads the manifest and re-reconciles per refresh (git stays the live
+authority; nothing is cached across refreshes but the previous snapshot);
+outcomes carry a generation counter and stale ones are discarded. A **failed**
+refresh keeps the last good snapshot on screen and says so in words in the
+footer — the screen never blanks and never silently looks fresh. Mashing `r`
+coalesces to one reconcile, not N.
+
+### Ticks
+
+`Space` marks a finding as dealt-with for this session: dimmed but still
+visible, session-local, keyed on `(severity, code, subject)`. Ticks survive a
+refresh — but a finding that vanishes and returns, or **escalates in
+severity**, comes back unticked: state that changed twice is new evidence, and
+a pre-dimmed Blocker is the one thing the pane must never show.
+
+### Shell-out inspection
+
+`Enter` on a commit in the log suspends the TUI and opens the commit on the
+real screen: `tig show <oid>` if `tig` is on `PATH` (probed once at startup),
+else `git -C <wine> show <oid>` driving its own pager. The detail pane names
+which one you will get before you press it. A failed inspection reports cause
+first, command line last, in the footer — worded as an inspect failure, never
+as stale data — and clears on the next keypress.
+
+### Deliberately v2
+
+* **Provenance capture** — remedy + catalogue prose serve the failure path
+  today; hand-written provenance strings would drift, and drift here is a
+  silent breakdown. The worker seam makes the recording decorator a one-site
+  change later.
+* **Persisted ticks** — session-local is the honest scope until a tick's
+  identity can survive a reconcile that renames subjects.
+* **Rebindable keys** — the single static table is the feature; a config file
+  would reintroduce the drift the table exists to prevent.
+
 ## Finding codes
 
 ### Tiers
@@ -338,7 +425,8 @@ before any `gix` version bump; both are read-only.
 crates/sodactl-git    GitRead; GitCli (binary, the oracle) + GitGix (gitoxide)
                       + GitHybrid (production) + Differential (the harness)
 crates/sodactl-core   manifest, findings, reconcile, checks/, tags, rrcache
-crates/sodactl-cli    clap front end: status, check, rr-health, selfcheck
+crates/sodactl-cli    clap front end: status, check, rr-health, selfcheck, tui
+crates/sodactl-tui    ratatui dashboard (no tokio; crossterm only via re-export)
 crates/sodactl-mcp    MCP surface (compiles; no entry point yet)
 ```
 

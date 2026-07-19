@@ -5,6 +5,7 @@ members = [
     "crates/sodactl-git",
     "crates/sodactl-cli",
     "crates/sodactl-mcp",
+    "crates/sodactl-tui",
 ]
 
 # Deliberately its own workspace with its own lockfile. This is a HOST tool; it

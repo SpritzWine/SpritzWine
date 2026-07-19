@@ -11,7 +11,10 @@
 use serde::Serialize;
 use sodactl_git::Pin;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+// `Hash` because the TUI keys tree nodes on `Severity` (tui-tree-widget wants
+// `Identifier: Hash`); it is derivable for free on a fieldless enum and implies
+// nothing about ordering, which `Ord` already owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Actively shipping wrong bits, or will corrupt history if acted on.
