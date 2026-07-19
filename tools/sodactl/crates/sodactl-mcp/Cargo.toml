@@ -1,0 +1,40 @@
+[package]
+name = "sodactl-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# rmcp is QUARANTINED here and nowhere else. The MCP spec revises on a calendar
+# and rmcp tracks it with major bumps; confining the SDK to one leaf crate makes
+# that migration a contained diff instead of a workspace-wide one. `=2.2.0` is
+# exact on purpose -- a caret range on a pre-3.0 SDK is an unreviewed upgrade
+# arriving via `cargo update`.
+#
+# Features are the minimum that compiles a stdio tools-only server:
+#   server        -- ServerHandler, ToolRouter (pulls transport-async-rw)
+#   macros        -- #[tool] / #[tool_router] / #[tool_handler]
+#   schemars      -- JsonSchema, re-exported as `rmcp::schemars`
+#   transport-io  -- server-side stdio
+# Deliberately NOT enabled: `elicitation` (the plan lists it, but it only earns
+# its keep once a mutating tool exists -- every tool here is read-only), `client`,
+# and anything HTTP.
+[dependencies]
+sodactl-core = { path = "../sodactl-core" }
+sodactl-git = { path = "../sodactl-git" }
+rmcp = { version = "=2.2.0", default-features = false, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+] }
+# `rt-multi-thread` so a slow git read parked on spawn_blocking cannot stall the
+# JSON-RPC reactor; `io-std` is what transport-io wires stdin/stdout through.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "io-std",
+] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

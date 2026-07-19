@@ -1,0 +1,38 @@
+[package]
+name = "sodactl-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror = "2"
+# The gix feature set is MINIMAL and every entry is justified; do not add
+# `default-features` back (defaults cost +29 packages of interrupt/progress/
+# dirwalk machinery nothing here calls). Verified by compile-probe: removing any
+# one of these breaks the build.
+#   sha1     -- the hash backend is feature-selected; without it gix does not
+#               compile at all. No sha256: the repo is SHA-1.
+#   revision -- rev_parse_single, i.e. the rev-spec grammar (`^{commit}`,
+#               `HEAD:wine`).
+#   merge    -- merge_trees -> reapply_verdict. The expensive one (~+29
+#               packages: blob-diff pipeline, filter/attribute stack).
+#   index    -- +0 packages (already transitive via merge's worktree stack),
+#               declared EXPLICITLY so submodule_index_oid's gitlink read does
+#               not rest on another feature's private dependency graph.
+#   parallel -- NOT for parallelism: it is what switches gix's shared-ownership
+#               primitives from Rc to Arc, and without it `ThreadSafeRepository`
+#               is not actually `Sync` -- the MCP server shares its `Ctx`
+#               across tokio threads, so this is a compile error, not a
+#               preference. None of the APIs this crate calls become
+#               multi-threaded by enabling it.
+# Deliberately NOT taken: status/dirwalk (excluded by decision -- see
+# `GitGix::status`), max-performance-safe (perf is not the reason for this
+# migration), revparse-regex, serde, comfort/basic/extras.
+gix = { version = "0.85.0", default-features = false, features = [
+    "sha1",
+    "revision",
+    "merge",
+    "index",
+    "parallel",
+] }

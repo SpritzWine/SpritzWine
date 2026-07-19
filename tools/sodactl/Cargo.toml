@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sodactl-core",
+    "crates/sodactl-git",
+    "crates/sodactl-cli",
+    "crates/sodactl-mcp",
+]
+
+# Deliberately its own workspace with its own lockfile. This is a HOST tool; it
+# must never enter the Wine build's dependency surface, and `build.sh` never
+# touches it. Same split the installer already got right (core: anyhow only,
+# vs gui: 616 packages).
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-2.1-or-later"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"

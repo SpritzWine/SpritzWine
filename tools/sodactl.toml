@@ -1,0 +1,216 @@
+# sodactl manifest -- what git cannot know.
+#
+# Declares POLICY and TOPOLOGY EDGES only. Never geometry: no commit counts, no
+# "this tier has N commits". Those are observations, and `sodactl` derives them
+# live. A hand-written count is a lie waiting to happen while a destructive
+# operation depends on it.
+#
+# See docs/BRANCHING.md for the model this encodes.
+
+schema = 1
+
+# Generated files the build leaves behind. These must not trip the dirty-tree
+# guard, or every operation refuses on a warm tree.
+# (Top-level keys must precede the first table header -- TOML scoping.)
+build_artifacts = [
+    ".build-env-stamp",
+    "configure",
+    "dlls/actxprxy/actxprxy_mshtml.h",
+    "dlls/msxml3/xslpattern.tab.c",
+    "dlls/msxml3/xslpattern.tab.h",
+    "dlls/msxml3/xslpattern.yy.c",
+]
+
+[repo]
+superproject = "."
+wine = "wine"
+
+# The one genuinely unrecoverable constant: the commit the soda tiers are
+# authored on, and the exclusive start of every replayed range.
+#
+# It is emphatically NOT `git merge-base <wine-base> <soda-tip>` -- for a
+# cross-base replay that is the common wine ancestor down around 11.0, and using
+# it would replay thousands of upstream commits onto Valve's tree.
+[repo.home_base]
+commit = "1bb0da91a5e"
+describes = "wine-11.12-79-g1bb0da91a5e"
+derivation = "6260d89930c^"
+
+[remotes]
+codeberg = "https://codeberg.org/SpritzWine/wine.git"
+winehq = "https://gitlab.winehq.org/wine/wine.git"
+valve-wine = "/media/Data/valve-wine-bare.git"
+
+# ---- tiers: authored, hand-written. `parent` is the ONLY declared geometry. ----
+
+[[tier]]
+name = "soda-build"
+parent = "$home_base"
+remote = "codeberg"
+
+[[tier]]
+name = "soda-core"
+parent = "soda-build"
+remote = "codeberg"
+
+[[tier]]
+name = "soda-glorious"
+parent = "soda-core"
+remote = "codeberg"
+
+[[tier]]
+name = "soda-ntdll"
+parent = "soda-core"
+remote = "codeberg"
+
+[[tier]]
+name = "soda-fsync"
+parent = "soda-core"
+remote = "codeberg"
+
+[[tier]]
+name = "soda-branding"
+parent = "soda-core"
+remote = "codeberg"
+
+[[tier]]
+name = "soda-demo"
+parent = "soda-build"
+remote = "codeberg"
+
+# ---- stitches: a linearization of a tier subset. Order is load-bearing --
+# soda-ntdll and soda-fsync both live in dlls/ntdll/unix/. ----
+
+[[stitch]]
+name = "soda-full"
+base_tier = "soda-core"
+order = ["soda-glorious", "soda-ntdll", "soda-fsync", "soda-branding"]
+local_only = true
+
+# ---- consumers: GENERATED, force-pushed, never hand-edited. ----
+
+[[consumer]]
+name = "spritzwine"
+# A TAG, not a remote-tracking branch -- unlike proton_11.0 below, which is a
+# branch on the valve-wine remote. `winehq/wine-11.13` does not resolve; upstream
+# release points are tags. Getting this wrong made the consumer's base
+# unresolvable and every currency check unanswerable.
+base = "wine-11.13"
+soda_tip = "soda-full"
+pinned_by_superproject = true
+
+[[consumer]]
+name = "spritzvalve"
+base = "valve-wine/proton_11.0"
+soda_tip = "soda-branding"
+pinned_by_superproject = false
+# BRANCHING.md rule 1, in its purest form: Valve's base ALREADY HAS fsync, so
+# pouring soda-fsync in is "a conflict looking for a place to happen". These are
+# declared here, on the consumer, rather than in a global list keyed by consumer
+# name -- a keyed list matches by string and so can miss silently, or hit the
+# wrong consumer entirely.
+exclude = ["soda-fsync", "soda-glorious"]
+
+# ---- policy: the judgement calls. ----
+#
+# These were hardcoded Rust defaults, which contradicted this file's own opening
+# line. They are decisions, not observations, so they belong where a reviewer
+# reads them and a diff records who changed them.
+#
+# Deleting this whole section is safe and well-defined: the tool falls back to
+# the values it used to compile in. Deleting a single KEY is not the same thing
+# -- within a present [policy] an omitted list means empty, so that "we declare
+# no aliases" is expressible at all.
+[policy]
+
+# Base-free tag names that are OURS. Declared, never pattern-guessed: the tag
+# grammar is `<component>-<base>-<version>`, and anything failing to parse is
+# dropped as Foreign BEFORE any comparison runs. So a missing alias does not
+# raise a wrong finding, it makes the tag invisible -- a silent hole rather than
+# a loud error, which is the worse failure and the reason this is a list and not
+# a regex.
+#   soda-all         -- BRANCHING.md: alias of `soda-11.12-1`, the union
+#                       reference; base-free deliberately, "so it will not
+#                       scroll away as the family number climbs".
+#   spritzwine-archive -- the pre-tier-model hand-authored fork, kept reachable
+#                       so the carve into tiers can be audited. A museum piece
+#                       with a ref; it is ours, and it is not a consumer.
+tag_aliases = ["soda-all", "spritzwine-archive"]
+
+# Local branches that are documented artifacts rather than debris, and so must
+# not surface as UNMODELLED_BRANCH.
+#   spritzvalve-full -- BRANCHING.md's standing example of a consumer you do not
+#                       see: an experimental mix (spritzvalve plus
+#                       soda-glorious) stitched and vetted locally and
+#                       DELIBERATELY not pushed. A consumer reaches the remote
+#                       when it passes the boot gate, not when it compiles.
+ignore_branches = ["spritzvalve-full"]
+
+# Where the tracked rerere cache lives, relative to the superproject. It is
+# committed, and `regenerate.sh` seeds `wine/.git/rr-cache` from it; the live
+# copy is one developer's scratch state and is never the authority.
+rr_cache = "tools/rr-cache"
+
+# Severity for TAG_FAMILY_SKEW: "blocker" | "drift" | "off".
+#
+# THIS VALUE ENCODES AN ASSUMPTION, NOT AN ANSWER. What the trailing integer in
+# `<component>-<base>-<N>` is meant to gate ACROSS components is undecided. If
+# `-3` means "cut together, use together", then soda-11.12-3 alongside
+# spritzwine-11.13-3 with any component lagging is a defect and this is
+# "blocker". If a component may legitimately lag between release cuts, the skew
+# is normal mid-release noise and this is "off".
+#
+# It is "drift" -- visible, not gating -- purely because that is what the tool
+# did before this key existed, and a refactor is the wrong place to decide it.
+# The check fires on every PARTIAL release, so a wrong severity here is one you
+# meet constantly; that is the argument for settling it, and against guessing.
+# Note also that the comparison is structurally incomplete either way:
+# `prater-*` lives in a third repository this tool cannot see.
+family_skew = "drift"
+
+# Tags INTENDED to name one commit. Each suppresses a TAG_COLLISION, so each
+# carries a reason -- an unexplained suppression is indistinguishable from
+# someone muting an inconvenient finding.
+[[policy.tag_equivalence]]
+tags = ["spritzvalve-11.0-1", "spritzvalve-11.0-3"]
+reason = """
+BRANCHING.md, verbatim: "the family rolled, this glass did not need \
+re-pouring." Regeneration and tagging are separate decisions, so a consumer \
+needing no re-pour legitimately keeps its commit across a family release. \
+-11.0-1 is kept because things pinned it.\
+"""
+
+[[policy.tag_equivalence]]
+tags = ["soda-all", "soda-11.12-1"]
+reason = """
+Two names for one frozen point by construction, not by accident: `soda-all` is \
+the base-free union reference whose tree all six tiers must still reconstruct. \
+It exists precisely so that reference does not scroll away as the family number \
+climbs, which requires it to name the same commit as a family tag.\
+"""
+
+# ---- conflicts rerere is STRUCTURALLY incapable of learning. ----
+#
+# rerere records line-level text conflict resolutions. It cannot record a
+# modify/delete, and it cannot record a binary blob. Both of these recur on
+# EVERY regeneration and were being resolved by hand every single time.
+
+[[binary_resolution]]
+path = "configure"
+strategy = "delete"
+reason = """
+Upstream wine tracks the generated `configure`; Valve's proton_11.0 does not. \
+Replaying soda-build onto the Valve base is therefore always a modify/delete \
+conflict. The base wins: configure.ac merges cleanly and build.sh's autoreconf \
+regenerates it.\
+"""
+consumers = ["spritzvalve"]
+
+[[binary_resolution]]
+path = "dlls/user32/resources/oic_winlogo.ico"
+strategy = "ours"
+reason = """
+Binary conflict in the soda-branding replay. The tier owns the glass icon \
+unconditionally -- verified: tier blob 2f56ce03d19 is byte-identical in every \
+shipped consumer tag, and differs from both wine bases.\
+"""

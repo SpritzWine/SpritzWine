@@ -24,3 +24,9 @@ rust/src_lib/generated/
 **/*.o
 **/*.so
 **/*.res
+
+# sodactl: host tool with its OWN workspace and lockfile, so it has its own
+# target dir rather than sharing rust/target/. The fixture is a generated
+# synthetic repo -- mkfixture.sh rebuilds it in <1s, so it is never committed.
+tools/sodactl/target/
+tools/sodactl/tests/fixtures/

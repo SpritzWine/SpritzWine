@@ -1,0 +1,22 @@
+[package]
+name = "sodactl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sodactl"
+path = "src/main.rs"
+
+[dependencies]
+sodactl-core = { path = "../sodactl-core" }
+sodactl-git = { path = "../sodactl-git" }
+# The MCP surface is a SUBCOMMAND of this binary, not a second binary: one thing
+# to build, install and point `.mcp.json` at. rmcp stays quarantined in the mcp
+# crate -- the CLI only reaches the `serve_stdio` entry point, and depends on
+# tokio solely to drive it.
+sodactl-mcp = { path = "../sodactl-mcp" }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde_json.workspace = true
+anyhow.workspace = true
