@@ -551,6 +551,15 @@ section + section { border-top: 1px solid var(--hair); }
   --wm-tick: var(--muted);
   font-family: var(--serif); font-weight: 600; letter-spacing: normal;
 }
+/* a sibling that is a link: the name keeps its ink — only the underline
+   wears the gold. The text is a wordmark, not chrome. */
+.family .sibs a {
+  color: var(--ink);
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 6px;
+}
+.family .sibs a:hover { text-decoration-thickness: 2.5px; }
 .family p { margin-inline: auto; margin-top: 18px; }
 
 /* ---------- footer ---------- */
