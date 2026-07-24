@@ -137,7 +137,7 @@
 
       <figure class="arch-fig arch-fig-wide">
         <svg viewBox="0 0 880 322" role="img"
-             aria-label="How a consumer branch is poured. On the left, five authored soda tiers: soda-build, soda-core, soda-branding, soda-ntdll and soda-glorious. An arrow labelled replay --onto points to two glasses. The first, SpritzWine, is the endeavour: an upstream WineHQ base with all five tiers poured on top, drawn with a dashed outline because it has not been regenerated from the tiers yet. The second, spritzvalve, is the necessity: Valve&#39;s proton_11.0 base carrying only soda-build, soda-core and soda-branding. It is solid because it ships today, and it is the pin the Prater distribution is built from.">
+             aria-label="How a consumer branch is poured. On the left, six authored soda tiers: soda-build, soda-core, soda-glorious, soda-ntdll, soda-fsync and soda-branding. An arrow labelled replay --onto points to two glasses, both solid, both poured. The first, spritzwine, is the endeavour: upstream Wine 11.13 with all six tiers poured on top, tagged spritzwine-11.13-3 and pinned by the superproject. The second, spritzvalve, is the necessity: Valve&#39;s proton_11.0 base carrying only soda-build, soda-core and soda-branding, tagged spritzvalve-11.0-3 — the pin the Prater distribution is built from.">
           <defs>
             <marker id="arrowhead" viewBox="0 0 8 8" refX="7" refY="4"
                     markerWidth="6" markerHeight="6" orient="auto">
@@ -152,44 +152,46 @@
           <rect class="chip" x="2" y="60" width="176" height="24" rx="7"/>
           <text class="label" x="12" y="76">soda-core</text>
           <rect class="chip" x="2" y="90" width="176" height="24" rx="7"/>
-          <text class="label" x="12" y="106">soda-branding</text>
+          <text class="label" x="12" y="106">soda-glorious</text>
           <rect class="chip" x="2" y="120" width="176" height="24" rx="7"/>
           <text class="label" x="12" y="136">soda-ntdll</text>
           <rect class="chip" x="2" y="150" width="176" height="24" rx="7"/>
-          <text class="label" x="12" y="166">soda-glorious</text>
-          <text class="sub" x="2" y="196">The syrup. Carries no Wine of</text>
-          <text class="sub" x="2" y="212">its own — authored once, then</text>
-          <text class="sub" x="2" y="228">poured into either glass.</text>
+          <text class="label" x="12" y="166">soda-fsync</text>
+          <rect class="chip" x="2" y="180" width="176" height="24" rx="7"/>
+          <text class="label" x="12" y="196">soda-branding</text>
+          <text class="sub" x="2" y="226">The syrup. Carries no Wine of</text>
+          <text class="sub" x="2" y="242">its own — authored once, then</text>
+          <text class="sub" x="2" y="258">poured into either glass.</text>
 
           <!-- the pour -->
           <text class="sub" x="232" y="112" text-anchor="middle">replay --onto</text>
           <path class="arrow" d="M190 124 H 272" marker-end="url(#arrowhead)"/>
 
-          <!-- glass 1: SpritzWine, the endeavour -->
+          <!-- glass 1: spritzwine, the endeavour — poured since 11.13-3 -->
           <text class="kick" x="285" y="16">The endeavour</text>
-          <g class="band-planned">
-            <rect class="soda-3" x="287" y="40" width="266" height="26"/>
-            <text class="label on-soda" x="299" y="58">soda-branding</text>
-            <rect class="soda-5" x="287" y="68" width="266" height="26"/>
-            <text class="label on-soda" x="299" y="86">soda-ntdll</text>
-            <rect class="soda-4" x="287" y="96" width="266" height="26"/>
-            <text class="label on-soda" x="299" y="114">soda-glorious</text>
-            <rect class="soda-2" x="287" y="124" width="266" height="26"/>
-            <text class="label on-soda" x="299" y="142">soda-core</text>
-            <rect class="soda-1" x="287" y="152" width="266" height="26"/>
-            <text class="label on-soda" x="299" y="170">soda-build</text>
-            <rect class="wine-base-up" x="287" y="180" width="266" height="72"/>
-            <text class="label on-wine" x="299" y="204">winehq/wine</text>
-            <text class="sub on-wine-dim" x="299" y="226">Upstream — what Wine is becoming,</text>
-            <text class="sub on-wine-dim" x="299" y="242">not what it froze.</text>
-          </g>
+          <rect class="soda-3" x="287" y="40" width="266" height="21"/>
+          <text class="label on-soda" x="299" y="55">soda-branding</text>
+          <rect class="soda-6" x="287" y="63" width="266" height="21"/>
+          <text class="label on-soda" x="299" y="78">soda-fsync</text>
+          <rect class="soda-5" x="287" y="86" width="266" height="21"/>
+          <text class="label on-soda" x="299" y="101">soda-ntdll</text>
+          <rect class="soda-4" x="287" y="109" width="266" height="21"/>
+          <text class="label on-soda" x="299" y="124">soda-glorious</text>
+          <rect class="soda-2" x="287" y="132" width="266" height="21"/>
+          <text class="label on-soda" x="299" y="147">soda-core</text>
+          <rect class="soda-1" x="287" y="155" width="266" height="21"/>
+          <text class="label on-soda" x="299" y="170">soda-build</text>
+          <rect class="wine-base-up" x="287" y="178" width="266" height="74"/>
+          <text class="label on-wine" x="299" y="202">winehq/wine · 11.13</text>
+          <text class="sub on-wine-dim" x="299" y="224">Upstream — what Wine is becoming,</text>
+          <text class="sub on-wine-dim" x="299" y="240">not what it froze.</text>
           <circle class="fizz" cx="520" cy="58" r="2.6"/>
           <circle class="fizz" cx="470" cy="104" r="2"/>
           <circle class="fizz" cx="534" cy="146" r="2.2"/>
-          <path class="glass-planned" d="M287 36 V 244 a 8 8 0 0 0 8 8 H 545 a 8 8 0 0 0 8 -8 V 36"/>
-          <text class="label goal" x="287" y="276">= spritzwine</text>
-          <text class="sub" x="287" y="296">The full mix, on upstream Wine. The point of</text>
-          <text class="sub" x="287" y="312">the whole exercise — and not poured yet.</text>
+          <path class="glass-body" d="M287 36 V 244 a 8 8 0 0 0 8 8 H 545 a 8 8 0 0 0 8 -8 V 36"/>
+          <text class="label out" x="287" y="276">= spritzwine-11.13-3</text>
+          <text class="sub" x="287" y="296">The full mix, poured onto upstream Wine 11.13 —</text>
+          <text class="sub" x="287" y="312">tagged, and pinned by the superproject.</text>
 
           <!-- glass 2: spritzvalve, the necessity -->
           <text class="kick" x="592" y="16">The necessity</text>
@@ -206,15 +208,16 @@
           <circle class="fizz" cx="826" cy="112" r="2.6"/>
           <circle class="fizz" cx="782" cy="150" r="2"/>
           <path class="glass-body" d="M594 36 V 244 a 8 8 0 0 0 8 8 H 852 a 8 8 0 0 0 8 -8 V 36"/>
-          <text class="label out" x="594" y="276">= spritzvalve-11.0-1</text>
+          <text class="label out" x="594" y="276">= spritzvalve-11.0-3</text>
           <text class="sub" x="594" y="296">The thin mix, on Valve&#39;s Wine. Ships today —</text>
           <text class="sub" x="594" y="312">the pin the Prater distribution is built from.</text>
         </svg>
         <figcaption>
-          One syrup, two glasses. <strong>SpritzWine</strong> is the endeavour: the full mix over
-          upstream Wine. <strong>spritzvalve</strong> is what makes it provable — Valve&#39;s tree is
-          the only one anti-tamper titles boot on, and a game booting is this project&#39;s real test
-          suite. So the vehicle ships first; the destination is the point.
+          One syrup, two glasses — and since <code>spritzwine-11.13-3</code>, both of them poured.
+          <strong>spritzvalve</strong> is what makes it provable — Valve&#39;s tree is the only one
+          anti-tamper titles boot on, and a game booting is this project&#39;s real test suite. So
+          the vehicle shipped first. <strong>spritzwine</strong> is the point, and it now exists:
+          the full mix on upstream Wine, tagged and pinned.
           <a href="the-pour.html">The long version →</a>
         </figcaption>
       </figure>
@@ -227,14 +230,15 @@
     <p class="kicker">What ships today</p>
     <h2 id="shipped-h">The current pour.</h2>
     <p>
-      Not everything written is wired in — the tier decides what lands in a consumer.
-      The current pin (<code>spritzvalve-11.0-1</code> = build + core + branding)
+      Not everything written is wired in — the tier decides what lands in a consumer,
+      and there are two pinned glasses now. The one Prater is built from
+      (<code>spritzvalve-11.0-3</code> = build + core + branding, on Valve&#39;s tree)
       links Rust into these:
     </p>
 
     <div class="card tier-card">
       <table class="tier-table">
-        <caption>In the glass right now</caption>
+        <caption>In the glass Prater pours from</caption>
         <thead>
           <tr><th scope="col">Module</th><th scope="col">What’s in Rust</th></tr>
         </thead>
@@ -267,8 +271,15 @@
 
     <p class="aside-note">
       The threadpool, the SEH unwinder, LZNT1 compression, battery reporting and
-      DualSense rumble exist too — written, building, deliberately not shipped.
-      Code that isn’t proven on a real game stays in the workshop.
+      DualSense rumble are no longer workshop pieces: in
+      <code>spritzwine-11.13-3</code> — the upstream consumer the superproject now
+      pins — <code>ntdll</code> and <code>winebus.sys</code> link Rust too, six DLLs
+      in all, with Valve’s futex in-process sync vendored in via
+      <code>soda-fsync</code>. The boot gate doesn’t judge that glass —
+      <code>spritzwine</code> isn’t for games. Its proof is ordinary Windows
+      software, and it holds: as a Bottles runner it runs everyday programs
+      cleanly. The games’ gate stays on the Valve base, which is why Prater
+      pours the thin mix.
     </p>
 
     <p class="muted small">

@@ -25,12 +25,14 @@
   /* the pour — figure ink, fixed in both themes (contrast is checked
      against the band fill, not against the page) */
   --pour-wine: #8a5a10;
-  --pour-wine-up: #6b4f8a;          /* upstream WineHQ base — a different vintage, on purpose */
+  --pour-wine-up: #55406f;          /* upstream WineHQ base — a different vintage, on purpose;
+                                       deep enough that the cream labels clear 7:1 on it */
   --pour-soda-1: #d8b45e;
   --pour-soda-2: #e6ca8b;
   --pour-soda-3: #f0dcb4;
   --pour-soda-4: #ddbd74;
   --pour-soda-5: #ebd4a0;
+  --pour-soda-6: #d5b271;
 
   /* light theme (default) */
   --ground: #f4ede4;
@@ -357,7 +359,8 @@ section + section { border-top: 1px solid var(--hair); }
 .arch-fig svg { width: 100%; height: auto; display: block; overflow: visible; }
 .arch-fig .kick {
   font-family: var(--sans); font-size: 11px; font-weight: 700;
-  letter-spacing: 0.12em; text-transform: uppercase; fill: var(--muted);
+  letter-spacing: 0.12em; text-transform: uppercase;
+  fill: var(--ink); opacity: 0.8; /* muted was too faint at this size */
 }
 .arch-fig .label {
   font-family: var(--sans); font-size: 14px; font-weight: 650; fill: var(--ink);
@@ -376,7 +379,8 @@ section + section { border-top: 1px solid var(--hair); }
 .arch-fig .soda-3 { fill: var(--pour-soda-3); }
 .arch-fig .soda-4 { fill: var(--pour-soda-4); }
 .arch-fig .soda-5 { fill: var(--pour-soda-5); }
-/* The endeavour's glass is not poured yet: drawn, but dashed. */
+.arch-fig .soda-6 { fill: var(--pour-soda-6); }
+/* Kept for any future not-yet-poured glass: drawn, but dashed. */
 .arch-fig .glass-planned { fill: none; stroke: var(--ink); stroke-width: 2; opacity: 0.42; stroke-dasharray: 6 4; }
 .arch-fig .band-planned { opacity: 0.72; }   /* present, but visibly not poured yet */
 .arch-fig .label.goal { fill: var(--ink); }
@@ -580,8 +584,9 @@ section + section { border-top: 1px solid var(--hair); }
 /* forced colors: keep the drawn figure's edges visible */
 @media (forced-colors: active) {
   .card, .claim { border: 1px solid CanvasText; }
-  .arch-fig .chip, .arch-fig .wine-base,
-  .arch-fig .soda-1, .arch-fig .soda-2, .arch-fig .soda-3 {
+  .arch-fig .chip, .arch-fig .wine-base, .arch-fig .wine-base-up,
+  .arch-fig .soda-1, .arch-fig .soda-2, .arch-fig .soda-3,
+  .arch-fig .soda-4, .arch-fig .soda-5, .arch-fig .soda-6 {
     stroke: CanvasText; stroke-width: 1;
   }
 }
@@ -665,7 +670,8 @@ section + section { border-top: 1px solid var(--hair); }
 }
 .pour-fig .kick {
   font-family: var(--sans); font-size: 10.5px; font-weight: 700;
-  letter-spacing: 0.12em; text-transform: uppercase; fill: var(--muted);
+  letter-spacing: 0.12em; text-transform: uppercase;
+  fill: var(--ink); opacity: 0.8; /* muted was too faint at this size */
 }
 .pour-fig .kick.hot { fill: var(--accent); }
 .pour-fig .label { font-family: var(--sans); font-size: 13px; font-weight: 650; fill: var(--ink); }
@@ -682,11 +688,15 @@ section + section { border-top: 1px solid var(--hair); }
 .pour-fig .arrow { stroke: var(--muted); stroke-width: 1.5; fill: none; }
 .pour-fig .arrowhead { fill: var(--muted); }
 
-/* poured: the filled glass (spritzvalve). Fixed inks, as on the front page. */
+/* poured: the filled glasses. Fixed inks, as on the front page. */
 .pour-fig .wine-base { fill: var(--pour-wine); }
+.pour-fig .wine-base-up { fill: var(--pour-wine-up); }
 .pour-fig .soda-1 { fill: var(--pour-soda-1); }
 .pour-fig .soda-2 { fill: var(--pour-soda-2); }
 .pour-fig .soda-3 { fill: var(--pour-soda-3); }
+.pour-fig .soda-4 { fill: var(--pour-soda-4); }
+.pour-fig .soda-5 { fill: var(--pour-soda-5); }
+.pour-fig .soda-6 { fill: var(--pour-soda-6); }
 .pour-fig .on-soda { fill: #2b2320; }   /* >= 10:1 on every soda band */
 .pour-fig .on-wine { fill: #f4ede4; }   /* 5.1:1 on the wine band */
 .pour-fig .on-wine-dim { fill: rgba(244, 237, 228, 0.86); }
@@ -786,7 +796,8 @@ section + section { border-top: 1px solid var(--hair); }
 @media (forced-colors: active) {
   .glass-card, .stat, .toc a, .backlink { border: 1px solid CanvasText; }
   .pour-fig .chip, .pour-fig .box, .pour-fig .wine-base,
-  .pour-fig .soda-1, .pour-fig .soda-2, .pour-fig .soda-3 {
+  .pour-fig .soda-1, .pour-fig .soda-2, .pour-fig .soda-3,
+  .pour-fig .soda-4, .pour-fig .soda-5, .pour-fig .soda-6 {
     stroke: CanvasText; stroke-width: 1;
   }
 }

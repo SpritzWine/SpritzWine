@@ -1,3 +1,45 @@
+# SpritzWine 11.13-3 — the upstream pour
+
+The release where the endeavour glass stopped being a plan. `spritzwine-11.13-3` is the full
+mix — all six shipping tiers replayed onto upstream **Wine 11.13** — tagged, published, and
+pinned by the superproject's `wine` gitlink. The hand-authored pre-Valve fork that used to
+carry the `spritzwine` name is archived as `spritzwine-archive`. Release tags now follow the
+family scheme (`<consumer>-<base>-<n>`); `spritzvalve-11.0-3` is the `-11.0-1` pour re-tagged
+under it, same commit, and remains the pin Prater ships from.
+
+## New
+
+- **The generated `spritzwine` exists.** Upstream Release 11.13 + `soda-build`, `soda-core`,
+  `soda-glorious`, `soda-ntdll`, `soda-fsync`, `soda-branding`. Six Wine DLLs link Rust in
+  this pin — the four from 0.2.0 plus `ntdll` (threadpool, `RtlVirtualUnwind2`/SEH, LZNT1,
+  battery) and `winebus.sys` (DualSense rumble). `soda-ntdll` and `soda-glorious` are in a
+  published consumer for the first time. Verify it yourself:
+  `git grep -l lwine_ spritzwine-11.13-3 -- 'dlls/*/Makefile.in'`.
+- **A new tier: `soda-fsync`.** Valve's futex in-process sync backend, vendored — for
+  upstream bases only, since a Valve base already carries it. What keeps the upstream glass
+  from losing Valve-grade sync.
+- **Tiers are feature-commit branches now.** The one-squashed-commit-per-tier rule is
+  retired: it cost per-feature history and bought nothing, because the replay does not care
+  about commit count. A tier is a linear run of concise feature commits; tags are cut only at
+  release — but anything a superproject pins gets a tag first, always.
+- **The rerere cache grew to 17 tracked resolutions** (from 9) — the first upstream pour
+  recorded its stitches, so the next one replays them mechanically.
+- **CI releases on the family scheme.** Release lanes trigger on `<consumer>-<base>-<n>`
+  tags rather than only `v*`, re-cut tags force-update on sync so a wedged tag can't wedge
+  the build, and pre-releases are flagged by identifier instead of by any hyphen.
+
+## Heads-up
+
+- **The boot gate does not judge this glass.** `spritzwine` is not for games — that is
+  `spritzvalve`'s job, and the games' gate stays on the Valve base, which is why Prater's pin
+  remains the thin mix. The upstream pour's proof is ordinary Windows software, and it holds
+  in practice: as a Bottles runner it runs everyday programs cleanly.
+- **The `spritzwine` branch tip has already moved past the tag** — routine regeneration
+  picked up `soda-core`'s SHBrowseForFolder-to-XDG-portal routing. Regeneration does not earn
+  a tag; that ships with the next pinned release.
+
+---
+
 # SpritzWine 0.2.0
 
 The release where the Wine underneath changed. SpritzWine now mixes its Rust into

@@ -48,9 +48,9 @@
       <p class="lede">
         That sentence is lifted straight out of <code>wine/docs/BRANCHING.md</code>, and it
         is not a joke about drinks. It is the build. The <b>soda-<span aria-hidden="true">*</span></b>
-        tiers carry <em>no Wine of their own</em> — they are flavour, hand-written, one squashed
-        commit each. Pour them onto a Wine tree and you get a branch you can ship. Pour them
-        onto a <em>different</em> Wine tree and you get a different one.
+        tiers carry <em>no Wine of their own</em> — they are flavour, hand-written, a short
+        linear run of feature commits each. Pour them onto a Wine tree and you get a branch you
+        can ship. Pour them onto a <em>different</em> Wine tree and you get a different one.
       </p>
       <p class="lede">
         There are two glasses. One of them is the point of the project; the other one is how
@@ -78,7 +78,8 @@
     <p>
       Run <code>git branch -a</code> on the Wine fork and it looks like a mess:
       <code>soda-build</code>, <code>soda-core</code>, <code>soda-glorious</code>,
-      <code>soda-ntdll</code>, <code>soda-branding</code>, <code>soda-demo</code>,
+      <code>soda-ntdll</code>, <code>soda-fsync</code>, <code>soda-branding</code>,
+      <code>soda-demo</code>,
       <code>spritzvalve</code>, <code>spritzwine</code>, plus upstream’s
       <code>master</code> and Valve’s <code>proton_*</code>. It isn’t a mess. There are
       exactly two kinds of branch here, and once you know which is which, everything else
@@ -88,8 +89,9 @@
     <div class="claims" role="list">
       <div class="claim" role="listitem">
         <b>Authored — the <code>soda-*</code> tiers.</b>
-        Hand-written feature tiers. The source of truth. Each is <em>exactly one squashed
-        commit</em> on its parent — not a topic branch with history. You edit these. Always.
+        Hand-written feature tiers. The source of truth. Each is a <em>linear chain of concise
+        feature commits</em> on its parent — one commit per feature, never a merge. You edit
+        these. Always.
       </div>
       <div class="claim" role="listitem">
         <b>Generated — the consumers.</b>
@@ -116,16 +118,19 @@
 <section id="tiers" aria-labelledby="tiers-h">
   <div class="wrap">
     <p class="kicker">The syrup</p>
-    <h2 id="tiers-h">Six tiers, and a rule for adding a seventh.</h2>
+    <h2 id="tiers-h">Seven tiers, and a rule for adding an eighth.</h2>
     <p class="wide-note">
-      Each tier is one commit on top of its parent tier. That <em>is</em> the entire history —
-      <code class="long">git log soda-core</code> against the fork base prints two lines, because
-      <code>soda-core</code> sits on <code>soda-build</code>.
+      A tier is a linear run of feature commits on its parent tier — one concise commit per
+      feature, no merges. (It used to be <em>exactly one squashed commit</em>; that rule was
+      retired once it started costing per-feature history and buying nothing — the replay does
+      not care about commit count.) <code class="long">git log soda-core</code> against the fork
+      base prints three lines today, because <code>soda-core</code> sits on
+      <code>soda-build</code> and has grown a feature since it was carved out.
     </p>
 
     <div class="card tier-card" tabindex="0">
       <table class="tier-table">
-        <caption>The tier set (tagged <code>soda-11.12-1</code>, authored on wine&nbsp;11.12)</caption>
+        <caption>The tier set (tagged <code>soda-11.12-3</code>, authored on wine&nbsp;11.12)</caption>
         <thead>
           <tr>
             <th scope="col">Tier</th>
@@ -161,6 +166,13 @@
               battery/LZNT1, plus the wow64 power thunk.</td>
           </tr>
           <tr>
+            <th scope="row"><code>soda-fsync</code></th>
+            <td><code>soda-core</code></td>
+            <td>Valve’s futex in-process sync backend, vendored — for <b>upstream bases
+              only</b>, since a Valve base already carries it. What keeps the upstream glass
+              from losing Valve-grade sync.</td>
+          </tr>
+          <tr>
             <th scope="row"><code>soda-branding</code></th>
             <td><code>soda-core</code></td>
             <td>winecfg strings and icons. Per-consumer — a differently-branded consumer swaps
@@ -186,8 +198,8 @@
       comdlg32.
     </p>
     <p class="aside-note">
-      If a change needs neither, squash it into an existing tier. More tiers is not more
-      structure; it is more rebase surface.
+      If a change needs neither, it lands as a new feature commit on the tier that owns the
+      code it touches. More tiers is not more structure; it is more rebase surface.
     </p>
   </div>
 </section>
@@ -209,8 +221,8 @@
       is written out in the cards below, too.</p>
     <div class="fig-scroll" tabindex="0" role="group" aria-label="The replay, drawn — scrollable figure">
       <figure class="pour-fig">
-        <svg viewBox="0 0 920 560" role="img"
-             aria-label="The replay, drawn. On the left, the authored soda tiers: soda-build at the root, soda-core on top of it, and on top of soda-core the three children soda-glorious, soda-ntdll and soda-branding; soda-demo hangs off soda-build. In the middle, tools/regenerate.sh, which rebases the tiers onto a Wine base using git rerere. On the right, two glasses. The upper glass is spritzwine: an outline, not yet poured — the full mix of soda-build, soda-core, soda-glorious, soda-ntdll and soda-branding over an upstream WineHQ Wine base. The lower glass is spritzvalve: filled and shipping — soda-build, soda-core and soda-branding over Valve's proton_11.0 base, tagged spritzvalve-11.0-1, the pin the Prater distribution ships.">
+        <svg viewBox="0 0 920 580" role="img"
+             aria-label="The replay, drawn. On the left, the authored soda tiers: soda-build at the root, soda-core on top of it, and on top of soda-core the four children soda-glorious, soda-ntdll, soda-branding and soda-fsync; soda-demo hangs off soda-build, dashed because it ships in no consumer. In the middle, tools/regenerate.sh, which rebases the tiers onto a Wine base using git rerere, with 17 recorded resolutions. On the right, two poured glasses. The upper glass is spritzwine, tagged spritzwine-11.13-3: the full mix of all six tiers over upstream Wine 11.13, pinned by the superproject. The lower glass is spritzvalve, tagged spritzvalve-11.0-3: soda-build, soda-core and soda-branding over Valve's proton_11.0 base — the pin the Prater distribution ships.">
           <defs>
             <marker id="ph-arrow" viewBox="0 0 8 8" refX="7" refY="4"
                     markerWidth="6" markerHeight="6" orient="auto">
@@ -222,8 +234,8 @@
           <text class="kick hot" x="4" y="16">Authored · you edit here</text>
 
           <!-- spines -->
-          <path class="spine" d="M14 58 V 217 M14 81 H 20 M14 217 H 20"/>
-          <path class="spine" d="M30 94 V 181 M30 117 H 36 M30 149 H 36 M30 181 H 36"/>
+          <path class="spine" d="M14 58 V 249 M14 81 H 20 M14 249 H 20"/>
+          <path class="spine" d="M30 94 V 213 M30 117 H 36 M30 149 H 36 M30 181 H 36 M30 213 H 36"/>
 
           <rect class="chip" x="4" y="32" width="184" height="26" rx="7"/>
           <text class="label" x="14" y="49">soda-build</text>
@@ -231,22 +243,25 @@
           <rect class="chip" x="20" y="68" width="168" height="26" rx="7"/>
           <text class="label" x="30" y="85">soda-core</text>
 
-          <rect class="chip-held" x="36" y="104" width="152" height="26" rx="7"/>
-          <text class="label held" x="46" y="121">soda-glorious</text>
+          <rect class="chip" x="36" y="104" width="152" height="26" rx="7"/>
+          <text class="label" x="46" y="121">soda-glorious</text>
 
-          <rect class="chip-held" x="36" y="136" width="152" height="26" rx="7"/>
-          <text class="label held" x="46" y="153">soda-ntdll</text>
+          <rect class="chip" x="36" y="136" width="152" height="26" rx="7"/>
+          <text class="label" x="46" y="153">soda-ntdll</text>
 
           <rect class="chip" x="36" y="168" width="152" height="26" rx="7"/>
           <text class="label" x="46" y="185">soda-branding</text>
 
-          <rect class="chip-held" x="20" y="204" width="168" height="26" rx="7"/>
-          <text class="label held" x="30" y="221">soda-demo</text>
+          <rect class="chip" x="36" y="200" width="152" height="26" rx="7"/>
+          <text class="label" x="46" y="217">soda-fsync</text>
 
-          <text class="sub" x="4" y="256">Each tier: exactly one squashed</text>
-          <text class="sub" x="4" y="272">commit on its parent.</text>
-          <text class="sub" x="4" y="296">Dashed = in no published</text>
-          <text class="sub" x="4" y="312">consumer today.</text>
+          <rect class="chip-held" x="20" y="236" width="168" height="26" rx="7"/>
+          <text class="label held" x="30" y="253">soda-demo</text>
+
+          <text class="sub" x="4" y="288">Each tier: a linear run of feature</text>
+          <text class="sub" x="4" y="304">commits on its parent.</text>
+          <text class="sub" x="4" y="328">Dashed = in no published</text>
+          <text class="sub" x="4" y="344">consumer today.</text>
 
           <!-- ============ middle: the script ============ -->
           <path class="arrow" d="M196 132 H 224" marker-end="url(#ph-arrow)"/>
@@ -256,80 +271,87 @@
           <text class="mono sm" x="300" y="146" text-anchor="middle">rebase --onto</text>
 
           <text class="sub" x="300" y="182" text-anchor="middle">git rerere</text>
-          <text class="sub" x="300" y="198" text-anchor="middle">9 recorded</text>
+          <text class="sub" x="300" y="198" text-anchor="middle">17 recorded</text>
           <text class="sub" x="300" y="214" text-anchor="middle">resolutions</text>
 
           <!-- to the upper glass -->
           <path class="arrow" d="M372 118 C 384 112, 384 108, 394 106" marker-end="url(#ph-arrow)"/>
           <!-- to the lower glass -->
-          <path class="arrow" d="M372 148 C 390 210, 378 330, 394 372" marker-end="url(#ph-arrow)"/>
+          <path class="arrow" d="M372 148 C 390 220, 378 350, 394 392" marker-end="url(#ph-arrow)"/>
 
-          <!-- ============ right, top: spritzwine — the endeavour ============ -->
-          <text class="kick hot" x="410" y="20">The endeavour · not poured yet</text>
+          <!-- ============ right, top: spritzwine — the endeavour, poured ============ -->
+          <text class="kick hot" x="410" y="20">The endeavour · poured</text>
 
-          <rect class="band-empty" x="410" y="30" width="500" height="24" rx="3"/>
-          <text class="label" x="422" y="47">soda-branding</text>
-          <rect class="band-empty" x="410" y="56" width="500" height="24" rx="3"/>
-          <text class="label held" x="422" y="73">soda-ntdll</text>
-          <rect class="band-empty" x="410" y="82" width="500" height="24" rx="3"/>
-          <text class="label held" x="422" y="99">soda-glorious</text>
-          <rect class="band-empty" x="410" y="108" width="500" height="24" rx="3"/>
-          <text class="label" x="422" y="125">soda-core</text>
-          <rect class="band-empty" x="410" y="134" width="500" height="24" rx="3"/>
-          <text class="label" x="422" y="151">soda-build</text>
+          <rect class="soda-3" x="410" y="30" width="500" height="24"/>
+          <text class="label on-soda" x="422" y="47">soda-branding</text>
+          <rect class="soda-6" x="410" y="56" width="500" height="24"/>
+          <text class="label on-soda" x="422" y="73">soda-fsync</text>
+          <rect class="soda-5" x="410" y="82" width="500" height="24"/>
+          <text class="label on-soda" x="422" y="99">soda-ntdll</text>
+          <rect class="soda-4" x="410" y="108" width="500" height="24"/>
+          <text class="label on-soda" x="422" y="125">soda-glorious</text>
+          <rect class="soda-2" x="410" y="134" width="500" height="24"/>
+          <text class="label on-soda" x="422" y="151">soda-core</text>
+          <rect class="soda-1" x="410" y="160" width="500" height="24"/>
+          <text class="label on-soda" x="422" y="177">soda-build</text>
 
-          <rect class="base-empty" x="410" y="162" width="500" height="62" rx="3"/>
-          <text class="label" x="422" y="183">upstream WineHQ wine</text>
-          <text class="sub" x="422" y="201">what Wine is becoming — no Valve patchset,</text>
-          <text class="sub" x="422" y="216">no Proton, no Steam-shaped parts</text>
+          <rect class="wine-base-up" x="410" y="188" width="500" height="62"/>
+          <text class="label on-wine" x="422" y="209">upstream WineHQ wine · Release 11.13</text>
+          <text class="sub on-wine-dim" x="422" y="227">no Valve base, no Proton, no Steam-shaped parts —</text>
+          <text class="sub on-wine-dim" x="422" y="242">what Wine is becoming</text>
 
-          <path class="glass-empty" d="M406 26 V 216 a 8 8 0 0 0 8 8 H 906 a 8 8 0 0 0 8 -8 V 26"/>
+          <circle class="fizz" cx="700" cy="44" r="2.6"/>
+          <circle class="fizz" cx="790" cy="92" r="2"/>
+          <circle class="fizz" cx="640" cy="146" r="2.4"/>
 
-          <text class="label out" x="406" y="250">spritzwine · the full mix</text>
-          <text class="sub" x="406" y="270">The destination: Rust in Wine for its own sake. Today the branch of that</text>
-          <text class="sub" x="406" y="286">name is still the legacy hand-authored fork — not yet generated from the tiers.</text>
+          <path class="glass-body" d="M406 26 V 242 a 8 8 0 0 0 8 8 H 906 a 8 8 0 0 0 8 -8 V 26"/>
+
+          <text class="label out" x="406" y="282">= spritzwine-11.13-3 · the full mix</text>
+          <text class="sub" x="406" y="302">Poured, tagged and pinned by the superproject. The hand-authored fork that used</text>
+          <text class="sub" x="406" y="318">to carry the name is archived as spritzwine-archive.</text>
 
           <!-- ============ right, bottom: spritzvalve — the necessity ============ -->
-          <text class="kick" x="410" y="326">The necessity · in the glass today</text>
+          <text class="kick" x="410" y="346">The necessity · what Prater pours</text>
 
-          <rect class="soda-3" x="410" y="336" width="500" height="26"/>
-          <text class="label on-soda" x="422" y="354">soda-branding</text>
-          <rect class="soda-2" x="410" y="362" width="500" height="26"/>
-          <text class="label on-soda" x="422" y="380">soda-core</text>
-          <rect class="soda-1" x="410" y="388" width="500" height="26"/>
-          <text class="label on-soda" x="422" y="406">soda-build</text>
+          <rect class="soda-3" x="410" y="356" width="500" height="26"/>
+          <text class="label on-soda" x="422" y="374">soda-branding</text>
+          <rect class="soda-2" x="410" y="382" width="500" height="26"/>
+          <text class="label on-soda" x="422" y="400">soda-core</text>
+          <rect class="soda-1" x="410" y="408" width="500" height="26"/>
+          <text class="label on-soda" x="422" y="426">soda-build</text>
 
-          <rect class="wine-base" x="410" y="414" width="500" height="76"/>
-          <text class="label on-wine" x="422" y="438">valve-wine/proton_11.0</text>
-          <text class="sub on-wine-dim" x="422" y="458">Valve’s patchset — WINE_SIMULATE_WRITECOPY and</text>
-          <text class="sub on-wine-dim" x="422" y="474">the rest. The reason anti-tamper titles boot at all.</text>
+          <rect class="wine-base" x="410" y="434" width="500" height="76"/>
+          <text class="label on-wine" x="422" y="458">valve-wine/proton_11.0</text>
+          <text class="sub on-wine-dim" x="422" y="478">Valve’s patchset — WINE_SIMULATE_WRITECOPY and</text>
+          <text class="sub on-wine-dim" x="422" y="494">the rest. The reason anti-tamper titles boot at all.</text>
 
-          <circle class="fizz" cx="700" cy="350" r="3"/>
-          <circle class="fizz" cx="790" cy="374" r="2.2"/>
-          <circle class="fizz" cx="640" cy="398" r="2.6"/>
-          <circle class="fizz" cx="840" cy="400" r="1.8"/>
-          <circle class="fizz" cx="740" cy="424" r="2.4"/>
+          <circle class="fizz" cx="700" cy="370" r="3"/>
+          <circle class="fizz" cx="790" cy="394" r="2.2"/>
+          <circle class="fizz" cx="640" cy="418" r="2.6"/>
+          <circle class="fizz" cx="840" cy="420" r="1.8"/>
+          <circle class="fizz" cx="740" cy="444" r="2.4"/>
 
-          <path class="glass-body" d="M406 332 V 482 a 8 8 0 0 0 8 8 H 906 a 8 8 0 0 0 8 -8 V 332"/>
+          <path class="glass-body" d="M406 352 V 502 a 8 8 0 0 0 8 8 H 906 a 8 8 0 0 0 8 -8 V 352"/>
 
-          <text class="label out" x="406" y="516">= spritzvalve-11.0-1 · the thin mix, on purpose</text>
-          <text class="sub" x="406" y="536">Ships today. Prater’s wine submodule is pinned to this tag.</text>
+          <text class="label out" x="406" y="536">= spritzvalve-11.0-3 · the thin mix, on purpose</text>
+          <text class="sub" x="406" y="556">Ships today. The pin the Prater distribution is built from.</text>
         </svg>
         <figcaption>
-          The same syrup, two bases. The full glass is the one that boots games; the outlined
-          one is the one the project is actually for. Nothing in the tiers had to change to
-          get both — that is the entire argument for the machinery.
+          The same syrup, two bases — and both glasses full now. The lower one is the one that
+          boots games; the upper one is the one the project is actually for. Nothing in the
+          tiers had to change to get both — that is the entire argument for the machinery.
         </figcaption>
       </figure>
     </div>
 
     <div class="stat-row">
       <div class="stat">
-        <span class="n">1</span>
-        <span class="t">commit per tier — squashed, never a topic branch with history</span>
+        <span class="n">0</span>
+        <span class="t">merges in a tier — a linear run of concise feature commits, replayed
+          as one range</span>
       </div>
       <div class="stat">
-        <span class="n">9</span>
+        <span class="n">17</span>
         <span class="t">conflict resolutions in the tracked <code>git rerere</code> cache: a
           cross-base stitch is resolved once by a human, then identically by everyone and by CI</span>
       </div>
@@ -367,25 +389,26 @@
         <p class="role">The endeavour</p>
         <h3>spritzwine</h3>
         <p>
-          The tiers poured over <b>upstream WineHQ Wine</b>. No Valve patchset, no Proton, no
+          The tiers poured over <b>upstream WineHQ Wine</b>. No Valve base, no Proton, no
           Steam-shaped parts — Rust in Wine for its own sake, tracking what Wine is
           <em>becoming</em> rather than what Valve froze.
         </p>
         <p class="recipe">
-          <span class="base">upstream wine</span> + build + core + glorious + ntdll + branding
+          <span class="base">upstream wine 11.13</span> + build + core + glorious + ntdll + fsync + branding
         </p>
         <p>
           This is where the <em>fuller</em> mix lives, and where fixing plain software counts as
           much as fixing games: the battery and power reporting in <code>soda-ntdll</code> exists
           because Windows programs ask how much charge is left and Wine had no good answer. No
-          frametime was harmed or improved.
+          frametime was harmed or improved. Its proving ground is likewise plain software: as a
+          Bottles runner it runs everyday Windows programs without fuss.
         </p>
         <p class="foot">
-          <span class="pill">Roadmap</span>&nbsp; The branch carrying this name today is still the
-          original hand-authored pre-Valve fork on vanilla wine 11.12
-          (<code>wine-11.12-136</code>) — the tree the tiers were <em>carved out of</em>, not yet
-          a tier-generated consumer. Say it plainly: the generated <code>spritzwine</code> does
-          not exist yet.
+          <span class="pill ships">Poured</span>&nbsp; Tagged <code>spritzwine-11.13-3</code> —
+          all six shipping tiers, including <code>soda-fsync</code>’s vendored Valve sync,
+          replayed onto upstream Release 11.13 — and pinned by the superproject’s
+          <code>wine</code> gitlink. The hand-authored pre-Valve fork that used to carry the
+          name is archived as <code>spritzwine-archive</code>.
         </p>
       </article>
 
@@ -409,8 +432,9 @@
         </p>
         <p class="foot">
           <span class="pill ships">Ships today</span>&nbsp; Tagged
-          <code>spritzvalve-11.0-1</code> (<code>8c00a2018</code>,
-          <code>wine-11.0-1193</code>). Boots Avatar: Frontiers of Pandora, Risk of Rain 2 and
+          <code>spritzvalve-11.0-3</code> (<code>8c00a2018</code>,
+          <code>wine-11.0-1193</code> — the <code>-11.0-1</code> pour, re-tagged under the
+          family release scheme). Boots Avatar: Frontiers of Pandora, Risk of Rain 2 and
           Watch Dogs: Legion. It is what SpritzWine-Prater is built from.
         </p>
       </article>
@@ -427,25 +451,33 @@
 <!-- ======================= WHAT IS ACTUALLY RUST ======================= -->
 <section id="inside" aria-labelledby="inside-h">
   <div class="wrap">
-    <p class="kicker">In the shipping pin</p>
-    <h2 id="inside-h">Four DLLs. That is the whole of it.</h2>
+    <p class="kicker">In the shipping pins</p>
+    <h2 id="inside-h">Four DLLs in one glass. Six in the other.</h2>
     <p class="wide-note">
       Not what is <em>written</em> — what is in the Wine you get. In
-      <code>spritzvalve-11.0-1</code>, exactly four Wine DLLs link Rust:
-      <code>avrt</code> (MMCSS), <code>comdlg32</code> (the XDG-portal file chooser),
+      <code>spritzvalve-11.0-3</code>, the glass Prater pours from, exactly four Wine DLLs link
+      Rust: <code>avrt</code> (MMCSS), <code>comdlg32</code> (the XDG-portal file chooser),
       <code>hid</code> (the <code>HidP_*</code> value engine) and <code>hidparse.sys</code>
-      (the HID report-descriptor parser). <code>ntdll</code> and <code>winebus.sys</code> link
-      <b>no</b> Rust in that pin. The held-back tiers really are held back.
+      (the HID report-descriptor parser). In <code>spritzwine-11.13-3</code>, the upstream
+      glass, <code>ntdll</code> (threadpool, unwinder, LZNT1, battery) and
+      <code>winebus.sys</code> (DualSense rumble) join them — six in all, because the fuller
+      tiers are poured there.
     </p>
 
     <div class="codeblock" style="margin-top:26px;" tabindex="0">
 <pre><code><span class="c"># the question, answered by the tree rather than by a web page:</span>
-<span class="cmd">git grep -l lwine_ <span class="hl">spritzvalve-11.0-1</span> -- 'dlls/*/Makefile.in'</span>
+<span class="cmd">git grep -l lwine_ <span class="hl">spritzvalve-11.0-3</span> -- 'dlls/*/Makefile.in'</span>
 
 dlls/avrt/Makefile.in
 dlls/comdlg32/Makefile.in
 dlls/hid/Makefile.in
-dlls/hidparse.sys/Makefile.in</code></pre>
+dlls/hidparse.sys/Makefile.in
+
+<span class="cmd">git grep -l lwine_ <span class="hl">spritzwine-11.13-3</span> -- 'dlls/*/Makefile.in'</span>
+
+<span class="c"># … the same four, plus:</span>
+dlls/ntdll/Makefile.in
+dlls/winebus.sys/Makefile.in</code></pre>
     </div>
 
     <p style="margin-top:26px;" class="wide-note">
@@ -561,31 +593,35 @@ dlls/hidparse.sys/Makefile.in</code></pre>
       <div>
         <dt>Ships today</dt>
         <dd>
-          <b><code>spritzvalve-11.0-1</code></b> — commit <code>8c00a2018</code>,
-          <code>wine-11.0-1193</code>. Generated from <code>soda-build + soda-core +
-          soda-branding</code> onto <code>valve-wine/proton_11.0</code>. Prater’s
-          <code>wine</code> submodule is pinned to that tag. Boots Avatar: Frontiers of Pandora,
-          Risk of Rain 2, Watch Dogs: Legion.
+          <b><code>spritzvalve-11.0-3</code></b> — commit <code>8c00a2018</code>,
+          <code>wine-11.0-1193</code>, the <code>-11.0-1</code> pour re-tagged under the family
+          release scheme. Generated from <code>soda-build + soda-core + soda-branding</code>
+          onto <code>valve-wine/proton_11.0</code>. It is the pin the Prater distribution is
+          built from. Boots Avatar: Frontiers of Pandora, Risk of Rain 2, Watch Dogs: Legion.
         </dd>
       </div>
       <div>
-        <dt>Written, not shipped</dt>
+        <dt>Poured and pinned</dt>
         <dd>
-          <b><code>soda-ntdll</code> and <code>soda-glorious</code></b> — the threadpool,
-          <code>RtlVirtualUnwind2</code>/SEH, LZNT1, battery reporting, DualSense rumble. Written,
-          building, tested — and in <em>no published consumer</em>. They ship when they pass the
-          boot gate, not when they compile. An untested consumer sitting on a remote is an
-          invitation for somebody to pin it, and then you own it.
+          <b><code>spritzwine-11.13-3</code></b> — the generated upstream consumer, all six
+          shipping tiers on upstream Release 11.13, tagged and pinned by the superproject’s
+          <code>wine</code> gitlink. <code>soda-ntdll</code> and <code>soda-glorious</code> are
+          in a published consumer for the first time, and <code>soda-fsync</code> vendors
+          Valve’s futex in-process sync so the upstream base doesn’t give it up. The
+          hand-authored pre-Valve fork that used to carry the name is archived as
+          <code>spritzwine-archive</code>.
         </dd>
       </div>
       <div>
-        <dt>Roadmap</dt>
+        <dt>Poured, not pinned</dt>
         <dd>
-          <b>The generated <code>spritzwine</code> consumer does not exist yet.</b> The branch
-          carrying that name is the original hand-authored pre-Valve fork on vanilla wine 11.12
-          (<code>wine-11.12-136</code>) — it predates the model this page describes. The target
-          recipe is <code>build + core + glorious + ntdll + branding</code> on an upstream base.
-          It is a plan, not a shipped thing.
+          <b>The regenerated <code>spritzwine</code> branch tip has moved past the tag</b> — it
+          picked up <code>soda-core</code>’s SHBrowseForFolder-to-portal routing. Routine
+          regeneration does not earn a tag; that lands in the next pinned release. The boot
+          gate, note, does not judge this glass: <code>spritzwine</code> is not for games — its
+          proof is ordinary Windows software, and it already runs everyday programs cleanly
+          under Bottles. The games’ gate belongs to the Valve base, which is why Prater’s pin
+          stays the thin mix.
         </dd>
       </div>
       <div>
@@ -612,8 +648,8 @@ dlls/hidparse.sys/Makefile.in</code></pre>
           <b>Prater</b> — the Wiener Prater, the great public park and funfair, the place you
           actually go to <em>play</em> — is the distribution you install: the Proton fork, where
           the games are. It is not a fourth kind of branch. It is a <em>consumer of a consumer</em>:
-          Prater’s <code>wine</code> submodule is pinned to the <code>spritzvalve-11.0-1</code>
-          tag, and everything on this page happens upstream of it.
+          Prater pins the superproject at a commit whose <code>wine</code> is the
+          <code>spritzvalve-11.0-3</code> tag, and everything on this page happens upstream of it.
         </p>
         <p>
           Which is why <code>spritzvalve</code> exists at all. Prater is where the boot gate is
@@ -631,15 +667,19 @@ dlls/hidparse.sys/Makefile.in</code></pre>
         <h3 style="font-size:17px;">The pin chain, top to bottom</h3>
         <ul class="entry-list" style="margin-top:14px;">
           <li><span class="ctx">soda-*</span>
-            <span>authored tiers, on a wine-11.12 fork base. Tagged <code>soda-11.12-1</code>.</span></li>
+            <span>authored tiers, on a wine-11.12 fork base. Tagged <code>soda-11.12-3</code>.</span></li>
           <li><span class="ctx">regenerate.sh</span>
             <span>replays them <code>--onto</code> a Wine base, with <code>rerere</code>.</span></li>
+          <li><span class="ctx">spritzwine</span>
+            <span>the upstream consumer. Tagged <code>spritzwine-11.13-3</code> — the
+              superproject’s current <code>wine</code> pin.</span></li>
           <li><span class="ctx">spritzvalve</span>
-            <span>the generated consumer. Tagged <code>spritzvalve-11.0-1</code>.</span></li>
+            <span>the Valve-base consumer. Tagged <code>spritzvalve-11.0-3</code>.</span></li>
           <li><span class="ctx">SpritzWine</span>
-            <span>the superproject — pins the consumer + the Rust workspace.</span></li>
+            <span>the superproject — pins a consumer + the Rust workspace.</span></li>
           <li><span class="ctx">Prater</span>
-            <span>the Proton distribution. Pins the superproject’s output. This is the download.</span></li>
+            <span>the Proton distribution. Pins the superproject at a
+              <code>spritzvalve</code>-pinned commit. This is the download.</span></li>
         </ul>
       </div>
     </div>
