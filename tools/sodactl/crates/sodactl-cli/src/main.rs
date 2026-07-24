@@ -1,14 +1,21 @@
-//! `sodactl` -- read-only v0: `status` and `check`.
+//! `sodactl` -- the read surface (`status`/`check`/`rr-health`) plus the
+//! plan-first write verbs (`restack`/`stitch`/`regen`/`tag`/`pin`/`rr-gc`/
+//! `resume`/`undo`, dispatched in `verbs.rs`) and the build lanes.
 //!
-//! Rendering only. Every fact comes from `sodactl-core`, so `--json` and a
-//! future MCP surface return the identical values with no second code path.
+//! Rendering only in this file. Every fact comes from `sodactl-core`, so
+//! `--json` and the MCP surface return the identical values with no second
+//! code path. The write verbs default to printing a plan and changing
+//! nothing; `--apply` executes it. There is no push verb -- `push` prints.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sodactl_core::checks::{Policy, Workspace};
 use sodactl_core::{finding::Severity, present, reconcile_workspace, Manifest, RrSurvey};
-use sodactl_git::{Differential, GitCli, GitGix, GitHybrid, GitRead as _};
+use sodactl_git::{Differential, GitCli, GitGix, GitHybrid, GitMut, GitRead as _};
 use std::path::PathBuf;
+
+mod lanes;
+mod verbs;
 
 #[derive(Parser)]
 #[command(
@@ -39,6 +46,149 @@ enum Cmd {
     },
     /// The rerere cache: which entries can actually help, and which re-prompt forever.
     RrHealth,
+    /// Rebase a stale tier's own commits onto its parent's current tip.
+    ///
+    /// `<old>` is never an argument: the old base is computed from the child's
+    /// patch-id own-set, a backup ref is taken first, and the result is
+    /// patch-id-verified (restored from the backup on drift). Default prints
+    /// the plan and changes nothing.
+    Restack {
+        /// The tier branch to restack.
+        tier: String,
+        /// Also restack every descendant tier needing it, parents first.
+        #[arg(long)]
+        all_descendants: bool,
+        /// Execute the plan (re-derived and id-compared against the review).
+        #[arg(long)]
+        apply: bool,
+        /// Skip the interactive y/N confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List history-rewrite backups, or restore one (CAS against the live tip).
+    Undo {
+        /// Backup to restore, as listed: `<utc>/<branch>` (or the full ref).
+        /// Omit to list what exists.
+        backup: Option<String>,
+        /// Execute the restore (re-derived and id-compared against the review).
+        #[arg(long)]
+        apply: bool,
+        /// Skip the interactive y/N confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Continue a conflicted replay, after verifying nothing else moved.
+    Resume {
+        /// Actually run `git rebase --continue` (default only reports).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Rebuild a declared stitch from scratch: -B from the base tier, then the
+    /// manifest's cherry-pick order, patch-id-verified afterwards.
+    Stitch {
+        /// The [[stitch]] name from the manifest.
+        name: String,
+        /// Execute the plan (re-derived and id-compared against the review).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Cut `<family>-<winebase>-<n>` on the family's component tip.
+    ///
+    /// The target and the wine base are DERIVED (consumer branch or the soda
+    /// stitch; the base from the target's own base ref) -- only the family and
+    /// the version are arguments.
+    Tag {
+        /// A consumer name, or `soda`.
+        family: String,
+        /// The family version (the trailing integer).
+        n: u32,
+        /// Re-point an existing name / overrule the tag-time refusals.
+        #[arg(long)]
+        force: bool,
+        /// Execute the plan (re-derived and id-compared against the review).
+        #[arg(long)]
+        apply: bool,
+        /// Skip the interactive y/N confirmation (asked only with --force).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Move the superproject's wine pointer to a TAG: checkout, .gitmodules
+    /// branch=, gitlink -- one commit.
+    Pin {
+        /// The tag to pin (never a SHA, never a branch).
+        tag: String,
+        /// Skip the ls-remote probe of the .gitmodules URL.
+        #[arg(long)]
+        offline: bool,
+        /// Execute the plan (re-derived and id-compared against the review).
+        #[arg(long)]
+        apply: bool,
+        /// Skip the interactive y/N confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Re-pour a consumer: fetch its base, replay the soda tiers onto it
+    /// (rerere-seeded, `[[binary_resolution]]` rules applied per conflict),
+    /// then record the pour -- rr-cache persisted + committed, a
+    /// `[ledger.<consumer>]` entry written into the manifest, and an annotated
+    /// `gen/<consumer>/<utc>` provenance tag cut on the result.
+    Regen {
+        /// The [[consumer]] name from the manifest.
+        consumer: String,
+        /// Execute the plan (re-derived and id-compared against the review).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Prune the tracked rerere cache: postimage-less entries older than
+    /// --older-than, entries shadowed by an unscoped [[binary_resolution]]
+    /// rule (any age), stray thisimage files; then `git rerere gc` in wine and
+    /// one scoped superproject commit for the pruned cache.
+    #[command(name = "rr-gc")]
+    RrGc {
+        /// Only prune postimage-less entries at least this many days old.
+        #[arg(long, default_value_t = 30)]
+        older_than: u64,
+        /// Execute the plan (re-derived and compared against the review).
+        #[arg(long)]
+        apply: bool,
+        /// Skip the interactive y/N confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Print the ordered push commands (wine first). NEVER executes -- there
+    /// is no push verb and there will not be one; Florian pushes.
+    Push,
+    /// Run the superproject's `./build.sh` from the workspace root, terminal
+    /// inherited, the script's exit code passed through.
+    ///
+    /// Refuses when the wine checkout is not the effective superproject pin:
+    /// build.sh:44 (`git submodule update --force`) checks out the RECORDED
+    /// pin and silently builds it, so what you see would not be what builds.
+    Build {
+        /// Build despite checkout != pin (the PIN builds, not the checkout).
+        #[arg(long)]
+        anyway: bool,
+    },
+    /// Package the already-built tree via `packaging/package.sh` (terminal
+    /// inherited, exit code passed through). `--version` becomes the script's
+    /// `VERSION` environment -- it has no flag of its own.
+    Package {
+        /// The tarball's version label -- the release tag, normally.
+        #[arg(long)]
+        version: String,
+    },
+    /// Gate the built + packaged tree via `ci/smoke.sh` (terminal inherited,
+    /// exit code passed through) -- what Wine DECIDED, then the tarball.
+    Smoke,
+    /// The release checklist for one family version: tag -> pin -> build ->
+    /// package -> smoke -> push, each with live-derived status. Plan-only by
+    /// construction; nothing here executes anything.
+    Release {
+        /// A consumer name, or `soda`.
+        family: String,
+        /// The family version (the trailing integer).
+        n: u32,
+    },
     /// The failure-path dashboard: findings, tier graph, commit chain.
     Tui,
     /// Serve the read-only MCP surface over stdio (for Claude Code et al).
@@ -237,6 +387,59 @@ fn run(cli: Cli) -> Result<()> {
         wine_path: m.repo.wine.clone(),
     };
 
+    // The mutating verbs. They never consult the reconcile report -- the gate
+    // lives on push, and a verb refuses only on its OWN preconditions -- so
+    // they dispatch before the (multi-second) reconcile is spent, like the
+    // early-outs above. They sit after the Workspace exists because preflight
+    // needs both repositories. Exit codes are decided per error by
+    // `verbs::exit_code_for` (refusal/terminal state = the gate, everything
+    // else = "could not answer"), so they cannot fall through to the generic
+    // EXIT_ERROR mapping in `main`.
+    if matches!(
+        cli.cmd,
+        Cmd::Restack { .. }
+            | Cmd::Undo { .. }
+            | Cmd::Resume { .. }
+            | Cmd::Stitch { .. }
+            | Cmd::Tag { .. }
+            | Cmd::Pin { .. }
+            | Cmd::Regen { .. }
+            | Cmd::RrGc { .. }
+            | Cmd::Push
+            | Cmd::Release { .. }
+            | Cmd::Build { .. }
+            | Cmd::Package { .. }
+            | Cmd::Smoke
+    ) {
+        let wine_cli = GitCli::new(&wine);
+        let super_cli = GitCli::new(&root);
+        let wine_mut = GitMut::new(&wine);
+        let super_mut = GitMut::new(&root);
+        let actx = sodactl_core::plan::ApplyCtx {
+            wine: &wine_mut,
+            superproject: &super_mut,
+            wine_read: &git,
+            superproject_read: &super_git,
+            wine_path: m.repo.wine.clone(),
+        };
+        if let Err(e) = verbs::dispatch(
+            &cli.cmd,
+            &m,
+            &ws,
+            &git,
+            &wine_cli,
+            &super_cli,
+            &policy,
+            &actx,
+            &cli.manifest,
+            cli.json,
+        ) {
+            eprintln!("sodactl: {e:#}");
+            std::process::exit(verbs::exit_code_for(&e));
+        }
+        return Ok(());
+    }
+
     let report = reconcile_workspace(&m, &git, &ws, &policy)?;
 
     match cli.cmd {
@@ -261,7 +464,23 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         // Handled above, before the reconcile cost (Selfcheck in `main`).
-        Cmd::RrHealth | Cmd::Mcp | Cmd::Tui | Cmd::Selfcheck { .. } => unreachable!(),
+        Cmd::RrHealth
+        | Cmd::Mcp
+        | Cmd::Tui
+        | Cmd::Selfcheck { .. }
+        | Cmd::Restack { .. }
+        | Cmd::Undo { .. }
+        | Cmd::Resume { .. }
+        | Cmd::Stitch { .. }
+        | Cmd::Tag { .. }
+        | Cmd::Pin { .. }
+        | Cmd::Regen { .. }
+        | Cmd::RrGc { .. }
+        | Cmd::Push
+        | Cmd::Release { .. }
+        | Cmd::Build { .. }
+        | Cmd::Package { .. }
+        | Cmd::Smoke => unreachable!(),
     }
     Ok(())
 }

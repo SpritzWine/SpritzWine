@@ -7,5 +7,11 @@ license.workspace = true
 [dependencies]
 sodactl-git = { path = "../sodactl-git" }
 serde.workspace = true
+# The plan/apply journal (`.git/sodactl/journal/<plan-id>.json`) is JSON on
+# purpose -- readable by a human mid-recovery without this tool.
+serde_json.workspace = true
 toml.workspace = true
+# Ledger write-back only (`manifest::write_ledger_entry`): the one write this
+# crate performs against the manifest file must preserve its comments.
+toml_edit.workspace = true
 anyhow.workspace = true

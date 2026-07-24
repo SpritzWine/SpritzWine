@@ -23,9 +23,20 @@ use super::{own_limit, GitRead, Policy};
 use crate::finding::{Finding, Severity};
 use crate::manifest::Manifest;
 
+fn short(oid: &str) -> String {
+    oid[..oid.len().min(11)].to_string()
+}
+
 pub fn check(m: &Manifest, git: &dyn GitRead, p: &Policy) -> anyhow::Result<Vec<Finding>> {
     let mut f = Vec::new();
     let home = &m.repo.home_base.commit;
+
+    // The gen/<consumer>/ provenance tags, peeled, read ONCE -- and only when
+    // a ledger exists at all. With no ledger this check must stay
+    // byte-identical (and call-identical) to its pre-ledger self: that is the
+    // hard gate that lets the ledger land without re-blessing anything.
+    let gen_tags: Vec<(String, String)> =
+        if m.ledger.is_empty() { Vec::new() } else { git.tags_with_targets()? };
 
     for c in &m.consumer {
         let head = git.rev_parse(&c.name)?;
@@ -60,27 +71,143 @@ pub fn check(m: &Manifest, git: &dyn GitRead, p: &Policy) -> anyhow::Result<Vec<
             ));
         }
 
-        // F1 -- currency is not derivable without a generation ledger, and the
+        // F1 -- currency. With no ledger entry it is not derivable, and the
         // message has to say WHY or the next reader will "fix" it with a
-        // patch-id comparison and reintroduce the false positive above.
-        //
-        // HYGIENE, not Drift. Drift is defined as "the graph is inconsistent; a
-        // regeneration would produce stale output" -- an unknown is neither. It
-        // fires unconditionally, once per consumer, and cannot be cleared
-        // because the ledger-writing verb does not exist yet, so at Drift it
-        // made `check` unable to ever exit 0 on this repo. A gate that is
-        // permanently red is a gate everyone learns to ignore, which would take
-        // the real Blockers down with it.
-        f.push(Finding::new(
-            "CONSUMER_CURRENCY_UNKNOWN",
-            Severity::Hygiene,
-            &c.name,
-            format!(
-                "no generation ledger for `{}` -- a consumer is a cross-base replay, so patch-id equivalence against `{}` is not evidence of staleness and currency is not answerable",
-                c.name, c.soda_tip
-            ),
-            format!("tools/regenerate.sh {}   # `sodactl regen` (which would write the ledger) is NOT implemented -- v2", c.name),
-        ));
+        // patch-id comparison and reintroduce the false positive above. With
+        // an entry, the recorded inputs and result make it DECIDABLE: the
+        // upgrade the ledger exists for.
+        match m.ledger.get(&c.name) {
+            // HYGIENE, not Drift. Drift is defined as "the graph is
+            // inconsistent; a regeneration would produce stale output" -- an
+            // unknown is neither. It fires unconditionally, once per
+            // ledger-less consumer; at Drift it made `check` unable to ever
+            // exit 0 on this repo. A gate that is permanently red is a gate
+            // everyone learns to ignore, which would take the real Blockers
+            // down with it.
+            None => f.push(Finding::new(
+                "CONSUMER_CURRENCY_UNKNOWN",
+                Severity::Hygiene,
+                &c.name,
+                format!(
+                    "no generation ledger for `{}` -- a consumer is a cross-base replay, so patch-id equivalence against `{}` is not evidence of staleness and currency is not answerable",
+                    c.name, c.soda_tip
+                ),
+                format!("sodactl regen {} --apply   # the pour writes the [ledger.{}] entry that makes currency decidable", c.name, c.name),
+            )),
+            Some(g) => {
+                // Belt and braces first: the provenance tag mirrors the ledger
+                // entry, and if the newest one names a different result, one
+                // of the two records was moved or hand-edited -- trust
+                // NEITHER, and say so before any inference built on `g`.
+                let prefix = format!("gen/{}/", c.name);
+                let newest = gen_tags
+                    .iter()
+                    .filter(|(n, _)| n.starts_with(&prefix))
+                    // The UTC stamp orders lexicographically by construction.
+                    .max_by(|a, b| a.0.cmp(&b.0));
+                if let Some((tag, target)) = newest {
+                    if target != &g.result {
+                        f.push(Finding::new(
+                            "LEDGER_CONTRADICTS_TAG",
+                            Severity::Drift,
+                            &c.name,
+                            format!(
+                                "the ledger records `{}` poured to {} but the newest provenance tag `{tag}` names {} -- the two records of the same pour disagree, so neither can be trusted",
+                                c.name, short(&g.result), short(target)
+                            ),
+                            format!("verify the branch by hand (git -C wine log {}), then `sodactl regen {} --apply` to re-establish a consistent ledger + tag pair", c.name, c.name),
+                        ));
+                    }
+                }
+
+                match &head {
+                    // A ledger for a branch that does not resolve: the claim
+                    // and the repo disagree at the coarsest possible level.
+                    None => f.push(Finding::new(
+                        "LEDGER_CONTRADICTS_TIP",
+                        Severity::Drift,
+                        &c.name,
+                        format!(
+                            "the ledger records `{}` poured to {} but the branch does not resolve at all",
+                            c.name, short(&g.result)
+                        ),
+                        format!("sodactl regen {} --apply   # re-pour (recreates the branch and rewrites the ledger)", c.name),
+                    )),
+                    Some(tip) if tip != &g.result => {
+                        // Report WHICH WAY the disagreement runs -- the two
+                        // causes want opposite repairs, and a message that
+                        // cannot tell them apart sends someone to the wrong
+                        // one.
+                        let way = match git.rev_parse(&g.result)? {
+                            None => "and the recorded result commit no longer exists in this clone",
+                            Some(_) if git.is_ancestor(&g.result, &c.name)? =>
+                                "-- commits were made on the consumer after the recorded pour",
+                            Some(_) =>
+                                "-- the branch was re-poured or force-moved without a ledger write",
+                        };
+                        f.push(Finding::new(
+                            "LEDGER_CONTRADICTS_TIP",
+                            Severity::Drift,
+                            &c.name,
+                            format!(
+                                "the ledger records `{}` poured to {} but the tip is {} {way}",
+                                c.name, short(&g.result), short(tip)
+                            ),
+                            format!("if the extra commits are wanted, move them to a soda tier and re-pour; either way `sodactl regen {} --apply` restores the generated-never-authored invariant", c.name),
+                        ));
+                    }
+                    Some(_) => {
+                        // Result matches the tip, so the recorded INPUTS are
+                        // meaningful: any that moved since the pour means the
+                        // consumer no longer reflects what it would be poured
+                        // from today. This is the one staleness verdict a
+                        // cross-base replay supports (module header) -- and it
+                        // needs no patch-id at all.
+                        let mut moved = Vec::new();
+                        if let Some(b) = &base {
+                            if b != &g.base_commit {
+                                moved.push(format!(
+                                    "base `{}` ({} -> {})",
+                                    c.base,
+                                    short(&g.base_commit),
+                                    short(b)
+                                ));
+                            }
+                        }
+                        if let Some(s) = git.rev_parse(&c.soda_tip)? {
+                            if s != g.soda_commit {
+                                moved.push(format!(
+                                    "soda tip `{}` ({} -> {})",
+                                    c.soda_tip,
+                                    short(&g.soda_commit),
+                                    short(&s)
+                                ));
+                            }
+                        }
+                        if home != &g.home_base {
+                            moved.push(format!(
+                                "home base ({} -> {})",
+                                short(&g.home_base),
+                                short(home)
+                            ));
+                        }
+                        if !moved.is_empty() {
+                            f.push(Finding::new(
+                                "CONSUMER_STALE_BY_LEDGER",
+                                Severity::Drift,
+                                &c.name,
+                                format!(
+                                    "`{}` was poured from inputs that have since moved: {}",
+                                    c.name,
+                                    moved.join(", ")
+                                ),
+                                format!("sodactl regen {} --apply   # re-pour from the current inputs (rewrites the ledger entry)", c.name),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
         let (Some(_head), Some(_base)) = (&head, &base) else { continue };
 
@@ -96,7 +223,7 @@ pub fn check(m: &Manifest, git: &dyn GitRead, p: &Policy) -> anyhow::Result<Vec<
                     "`{}` does not descend from its declared base `{}` -- it was poured onto something else",
                     c.name, c.base
                 ),
-                format!("tools/regenerate.sh {}   # re-pour onto the declared base; `sodactl regen` is NOT implemented (v2)", c.name),
+                format!("sodactl regen {} --apply   # re-pour onto the declared base", c.name),
             ));
         }
 
@@ -164,7 +291,7 @@ pub fn check(m: &Manifest, git: &dyn GitRead, p: &Policy) -> anyhow::Result<Vec<
                             _ => "subject",
                         }
                     ),
-                    format!("tools/regenerate.sh {}   # re-pour without `{tier}`; `sodactl regen` is NOT implemented (v2)", c.name),
+                    format!("sodactl regen {} --apply   # re-pour without `{tier}`", c.name),
                 ));
             }
         }
@@ -210,7 +337,7 @@ pub fn check(m: &Manifest, git: &dyn GitRead, p: &Policy) -> anyhow::Result<Vec<
                     "`{}` carries nothing from `{tier}`: no commit matches by patch-id and none carries the `{tier}:` subject prefix",
                     c.name
                 ),
-                format!("tools/regenerate.sh {}   # re-pour from `{}`; `sodactl regen` is NOT implemented (v2)", c.name, c.soda_tip),
+                format!("sodactl regen {} --apply   # re-pour from `{}`", c.name, c.soda_tip),
             ));
         }
     }
@@ -290,6 +417,8 @@ soda_tip = "soda-core"
         merges: Vec<(String, Vec<String>)>,
         /// Oids `git cherry` reports as absent upstream.
         missing: Vec<String>,
+        /// `(short refname, peeled target)` -- the provenance-tag surface.
+        tags: Vec<(String, String)>,
     }
 
     impl GitRead for G {
@@ -315,7 +444,7 @@ soda_tip = "soda-core"
             Ok(vec![])
         }
         fn tags_with_targets(&self) -> Result<Vec<(String, Oid)>> {
-            Ok(vec![])
+            Ok(self.tags.clone())
         }
         fn branches_containing(&self, _: &str, _: bool) -> Result<Vec<String>> {
             Ok(vec![])
@@ -360,6 +489,118 @@ soda_tip = "soda-core"
         }
     }
 
+    fn empty_g() -> G {
+        G { log: vec![], merges: vec![], missing: vec![], tags: vec![] }
+    }
+
+    /// The identity fake resolves every rev to itself, so a ledger whose
+    /// recorded values ARE the manifest's ref names reads as "nothing moved".
+    fn ledger_manifest(base_commit: &str, soda_commit: &str, home: &str, result: &str) -> Manifest {
+        Manifest::parse(&format!(
+            "{MANIFEST}\n[ledger.spritzvalve]\nat = \"2026-07-24T00:00:00Z\"\nbase_commit = \"{base_commit}\"\nsoda_commit = \"{soda_commit}\"\nhome_base = \"{home}\"\nresult = \"{result}\"\nsodactl = \"0.1.0\"\n"
+        ))
+        .unwrap()
+    }
+
+    fn codes(f: &[Finding]) -> Vec<&str> {
+        f.iter().map(|x| x.code).collect()
+    }
+
+    /// The hard gate's check-side half: with NO ledger the finding set is
+    /// exactly what it was before the ledger existed -- the unknown fires,
+    /// none of the ledger codes can.
+    #[test]
+    fn without_a_ledger_currency_stays_unknown_and_nothing_new_fires() {
+        let m = Manifest::parse(MANIFEST).unwrap();
+        let f = check(&m, &empty_g(), &policy()).unwrap();
+        let c = codes(&f);
+        assert!(c.contains(&"CONSUMER_CURRENCY_UNKNOWN"), "{c:?}");
+        for new in ["CONSUMER_STALE_BY_LEDGER", "LEDGER_CONTRADICTS_TIP", "LEDGER_CONTRADICTS_TAG"]
+        {
+            assert!(!c.contains(&new), "{new} must need a ledger: {c:?}");
+        }
+    }
+
+    /// A ledger whose result is the tip and whose inputs are current: the
+    /// question is DECIDED, so neither the unknown nor any drift fires.
+    #[test]
+    fn a_current_ledger_silences_the_unknown_without_replacing_it() {
+        let m = ledger_manifest("valve", "soda-core", "home", "spritzvalve");
+        let f = check(&m, &empty_g(), &policy()).unwrap();
+        let c = codes(&f);
+        for gone in [
+            "CONSUMER_CURRENCY_UNKNOWN",
+            "CONSUMER_STALE_BY_LEDGER",
+            "LEDGER_CONTRADICTS_TIP",
+            "LEDGER_CONTRADICTS_TAG",
+        ] {
+            assert!(!c.contains(&gone), "{gone} must not fire when current: {c:?}");
+        }
+    }
+
+    /// An input that moved since the pour -- the staleness verdict the whole
+    /// ledger exists to make possible, with the moved input NAMED.
+    #[test]
+    fn a_moved_input_is_stale_by_ledger() {
+        let m = ledger_manifest("valve", "old-soda-tip", "home", "spritzvalve");
+        let f = check(&m, &empty_g(), &policy()).unwrap();
+        let hit = f
+            .iter()
+            .find(|x| x.code == "CONSUMER_STALE_BY_LEDGER")
+            .unwrap_or_else(|| panic!("{:?}", codes(&f)));
+        assert_eq!(hit.severity, Severity::Drift);
+        assert!(hit.summary.contains("soda tip `soda-core`"), "{}", hit.summary);
+        assert!(hit.remedy.contains("sodactl regen spritzvalve --apply"), "{}", hit.remedy);
+        assert!(!codes(&f).contains(&"CONSUMER_CURRENCY_UNKNOWN"));
+    }
+
+    /// The recorded result is not the tip: the ledger and the repo disagree
+    /// about the pour itself -- and the identity fake's is_ancestor answers
+    /// true, so the message must take the commits-were-added direction.
+    #[test]
+    fn a_result_that_is_not_the_tip_contradicts() {
+        let m = ledger_manifest("valve", "soda-core", "home", "some-older-pour");
+        let f = check(&m, &empty_g(), &policy()).unwrap();
+        let hit = f
+            .iter()
+            .find(|x| x.code == "LEDGER_CONTRADICTS_TIP")
+            .unwrap_or_else(|| panic!("{:?}", codes(&f)));
+        assert!(hit.summary.contains("commits were made on the consumer"), "{}", hit.summary);
+        // A wrong result must not ALSO be measured for input staleness --
+        // inferences on top of a contradicted record are noise.
+        assert!(!codes(&f).contains(&"CONSUMER_STALE_BY_LEDGER"), "{:?}", codes(&f));
+    }
+
+    /// The newest provenance tag names a different result than the ledger:
+    /// trust neither. Older tags are history, not contradiction.
+    #[test]
+    fn a_disagreeing_provenance_tag_condemns_both_records() {
+        let mut g = empty_g();
+        g.tags = vec![
+            // Older tag at some historic pour: fine.
+            ("gen/spritzvalve/20260101T000000Z".into(), "ancient".into()),
+            // Newest tag disagrees with the ledger's result.
+            ("gen/spritzvalve/20260701T000000Z".into(), "elsewhere".into()),
+            // A different consumer's tag must not bleed in.
+            ("gen/other/20260722T000000Z".into(), "spritzvalve".into()),
+        ];
+        let m = ledger_manifest("valve", "soda-core", "home", "spritzvalve");
+        let f = check(&m, &g, &policy()).unwrap();
+        let hit = f
+            .iter()
+            .find(|x| x.code == "LEDGER_CONTRADICTS_TAG")
+            .unwrap_or_else(|| panic!("{:?}", codes(&f)));
+        assert!(hit.summary.contains("gen/spritzvalve/20260701T000000Z"), "{}", hit.summary);
+        assert!(hit.summary.contains("neither can be trusted"), "{}", hit.summary);
+
+        // And when the newest tag AGREES, silence -- an older stray does not
+        // contradict a record it never mirrored.
+        g.tags.pop();
+        g.tags[1].1 = "spritzvalve".into();
+        let f = check(&m, &g, &policy()).unwrap();
+        assert!(!codes(&f).contains(&"LEDGER_CONTRADICTS_TAG"), "{:?}", codes(&f));
+    }
+
     /// THE regression. `soda-fsync` has two own commits, one of them a MERGE,
     /// and the consumer carries neither.
     ///
@@ -380,6 +621,7 @@ soda_tip = "soda-core"
             // The one non-merge commit is absent from the consumer: nothing of
             // this tier is present.
             missing: vec!["c1".into()],
+            tags: vec![],
         };
         let m = Manifest::parse(MANIFEST).unwrap();
         let f = check(&m, &g, &policy()).unwrap();
@@ -401,6 +643,7 @@ soda_tip = "soda-core"
             merges: vec![],
             // c2 is NOT missing -> it is present in the consumer.
             missing: vec!["c1".into()],
+            tags: vec![],
         };
         let m = Manifest::parse(MANIFEST).unwrap();
         let f = check(&m, &g, &policy()).unwrap();

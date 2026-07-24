@@ -62,9 +62,11 @@ use std::process::Command;
 
 pub mod differential;
 pub mod gix_backend;
+pub mod mutate;
 
 pub use differential::{Differential, DifferentialReport, Disagreement};
 pub use gix_backend::{GitGix, GitHybrid};
+pub use mutate::{GitMut, Side, ZERO_OID};
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -1270,6 +1272,137 @@ impl GitCli {
             .map(|o| o.filter(|s| !s.is_empty()))
     }
 
+    /// The tag's target on a remote, dereferenced to the commit where the
+    /// remote lets us: `Ok(None)` means the remote does not have the tag,
+    /// `Err` means the remote could not be asked (unreachable, not a repo).
+    ///
+    /// INHERENT on `GitCli`, deliberately NOT on `GitRead`: this is a NETWORK
+    /// probe. The trait is the differential surface -- two backends answering
+    /// the same question about the same LOCAL repository state -- and a call
+    /// whose answer depends on a remote's current refs and on the network
+    /// being up cannot even agree with itself across two invocations, let
+    /// alone across backends. Putting it on the trait would force either a
+    /// gix reimplementation of a transport (the exact wheel the hybrid
+    /// decision refuses to own) or a permanent exclusion entry excusing it;
+    /// keeping it off the trait states the truth in the type system instead.
+    ///
+    /// Line-split, documented as safe: the output is `<oid>\t<refname>` per
+    /// line, and a refname can contain neither a tab nor a newline
+    /// (`check-ref-format` forbids ASCII control characters and space).
+    pub fn ls_remote_tag(&self, remote: &str, tag: &str) -> Result<Option<Oid>> {
+        // Ask for both spellings in one round trip. `<ref>^{}` is ls-remote's
+        // peeled line: for an annotated tag the plain line names the TAG
+        // OBJECT, and handing that oid to anything that compares it against a
+        // commit manufactures a spurious mismatch -- the same deref discipline
+        // `rev_parse`'s `^{commit}` applies locally. A lightweight tag has no
+        // peeled line, and its plain oid already IS the target.
+        let peeled_ref = format!("refs/tags/{tag}^{{}}");
+        let plain_ref = format!("refs/tags/{tag}");
+        let args = ["ls-remote", remote, &peeled_ref, &plain_ref];
+        // Exit 0 with empty output is "the remote answered: no such tag"
+        // (ls-remote only exits nonzero when the remote itself cannot be
+        // reached or read), so `run`'s success-or-error split maps cleanly.
+        let out = self.run(&args)?;
+        let (mut peeled, mut plain) = (None, None);
+        for line in out.lines() {
+            let Some((oid, name)) = line.split_once('\t') else {
+                return Err(self.parse_err(&args, format!("expected `<oid>\\t<ref>`, got {line:?}")));
+            };
+            let oid = looks_like_oid(oid)
+                .ok_or_else(|| self.parse_err(&args, format!("`{oid}` is not an object id")))?;
+            // Exact names only: ls-remote patterns match against the TAIL of a
+            // refname, so a hypothetical `x/refs/tags/<tag>` would also come
+            // back. Anything not one of the two asked-for refs is ignored
+            // rather than trusted.
+            if name == peeled_ref {
+                peeled = Some(oid.to_string());
+            } else if name == plain_ref {
+                plain = Some(oid.to_string());
+            }
+        }
+        Ok(peeled.or(plain))
+    }
+
+    /// Every ref under `prefix` (e.g. `refs/sodactl/backup/`) with its stored
+    /// oid, in for-each-ref's refname order. No peeling: the backup namespace
+    /// stores branch tips AS WRITTEN and `undo` restores the same bytes.
+    ///
+    /// INHERENT on `GitCli`, deliberately NOT on `GitRead`, for a different
+    /// reason than `ls_remote_tag` above: this reads sodactl's OWN write-side
+    /// namespace -- the backup refs `GitMut` creates one module over -- and is
+    /// consumed only by the mutating verbs, which hold the binary-backed
+    /// handle by construction because that is the only thing that can write.
+    /// The trait is the differential surface for the read-only reconcile
+    /// pipeline; widening it for the write side's private bookkeeping would
+    /// cost five impls plus a permanent exclusion entry for a namespace no
+    /// check ever reads.
+    ///
+    /// Line-split, documented as safe: `%00` separates the two fields inside a
+    /// record and a refname can contain neither a newline nor a NUL
+    /// (`check-ref-format` forbids ASCII control characters).
+    pub fn refs_under(&self, prefix: &str) -> Result<Vec<(String, Oid)>> {
+        let args = ["for-each-ref", "--format=%(refname)%00%(objectname)", prefix];
+        let out = self.run(&args)?;
+        let mut v = Vec::new();
+        for line in out.lines() {
+            let Some((name, oid)) = line.split_once('\0') else {
+                return Err(self.parse_err(&args, format!("expected `<ref>\\0<oid>`, got {line:?}")));
+            };
+            let oid = looks_like_oid(oid)
+                .ok_or_else(|| self.parse_err(&args, format!("`{oid}` is not an object id")))?;
+            v.push((name.to_string(), oid.to_string()));
+        }
+        Ok(v)
+    }
+
+    /// Whether an UNMERGED path's two content sides (index stage 2 = ours,
+    /// stage 3 = theirs) differ as binary. `Ok(false)` covers both a text
+    /// conflict and a conflict with a missing side (modify/delete has no
+    /// stage pair to diff, and the binary/text question is meaningless for it).
+    ///
+    /// INHERENT on `GitCli`, deliberately NOT on `GitRead`, for `refs_under`'s
+    /// reason: this classifies a conflict the WRITE side is standing in the
+    /// middle of -- only `regen`'s conflict loop asks, and it holds the
+    /// binary-backed handle by construction. The reconcile pipeline never
+    /// observes an unmerged index (`REBASE_IN_FLIGHT` fires first).
+    ///
+    /// The classification is git's own, not a reimplementation: `diff
+    /// --numstat <blob> <blob>` prints `-\t-` exactly when git's binary
+    /// heuristic fires. Asking `diff --numstat` about the PATH instead is a
+    /// trap -- measured: an unmerged path renders as `0\t0`, indistinguishable
+    /// from an empty text change -- so the stages are read explicitly
+    /// (`ls-files -u -z`) and the blobs compared directly.
+    pub fn conflict_is_binary(&self, path: &str) -> Result<bool> {
+        let ls = ["ls-files", "-u", "-z", "--", path];
+        let out = self.run_bytes(&ls)?;
+        let (mut ours, mut theirs) = (None, None);
+        for rec in split_nul(&out) {
+            let rec = self.decode(rec, &ls)?;
+            // `<mode> <oid> <stage>\t<path>` -- the tab guards a path with
+            // spaces; the head is three space-separated fixed fields.
+            let Some((head, _path)) = rec.split_once('\t') else {
+                return Err(self.parse_err(&ls, format!("expected `<meta>\\t<path>`, got {rec:?}")));
+            };
+            let f: Vec<&str> = head.split(' ').collect();
+            let [_mode, oid, stage] = f.as_slice() else {
+                return Err(self.parse_err(&ls, format!("expected 3 meta fields, got {head:?}")));
+            };
+            let oid = looks_like_oid(oid)
+                .ok_or_else(|| self.parse_err(&ls, format!("`{oid}` is not an object id")))?;
+            match *stage {
+                "2" => ours = Some(oid.to_string()),
+                "3" => theirs = Some(oid.to_string()),
+                _ => {}
+            }
+        }
+        let (Some(a), Some(b)) = (ours, theirs) else { return Ok(false) };
+        let args = ["diff", "--numstat", &a, &b];
+        let out = self.run(&args)?;
+        let Some(line) = out.lines().next() else { return Ok(false) };
+        let mut f = line.split('\t');
+        Ok(f.next() == Some("-") && f.next() == Some("-"))
+    }
+
     /// `(oid, parents, subject)` for a range, oldest-first only if `extra` says
     /// so. The ONE place a commit record's shape is written down, so writer and
     /// parser cannot drift -- there is only one of each.
@@ -2174,5 +2307,70 @@ mod tests {
         // No superproject is "I cannot tell you", never "the pin is fine".
         let (_s, g) = scratch("nopin");
         assert!(matches!(g.superproject_pin().unwrap(), Pin::Unknown { .. }));
+    }
+
+    #[test]
+    fn ls_remote_tag_prefers_the_peeled_commit() {
+        // "." is a legitimate remote (the local transport against this very
+        // repo), which makes the network probe testable hermetically.
+        let (_s, g) = scratch("lsremote");
+        let head = g.rev_parse("HEAD").unwrap().unwrap();
+        g.run(&["tag", "-a", "v1", "-m", "annotated"]).unwrap();
+
+        let got = g.ls_remote_tag(".", "v1").unwrap().unwrap();
+        assert_eq!(got, head, "must be the peeled commit, never the tag object");
+        let tag_obj = g.rev_parse_raw("v1").unwrap().unwrap();
+        assert_ne!(got, tag_obj, "the annotated tag object must have been dereferenced");
+
+        // A lightweight tag has no peeled line; its plain oid is the target.
+        g.run(&["tag", "lw", "HEAD"]).unwrap();
+        assert_eq!(g.ls_remote_tag(".", "lw").unwrap().unwrap(), head);
+
+        // Absent tag = the remote's answer (None); unreachable remote = Err.
+        assert_eq!(g.ls_remote_tag(".", "no-such-tag").unwrap(), None);
+        assert!(g.ls_remote_tag("/dev/null/not-a-remote", "v1").is_err());
+    }
+
+    #[test]
+    fn conflict_classification_reads_the_stage_blobs_not_the_path() {
+        // One rebase stop carrying all three shapes at once: a binary add/add,
+        // a text both-modified, and a modify/delete (which has no stage pair
+        // and must classify as not-binary rather than error).
+        let (s, g) = scratch("conflictclass");
+        std::fs::write(s.0.join("gone.txt"), "doomed\n").unwrap();
+        g.run(&["add", "-A"]).unwrap();
+        g.run(&["commit", "-qm", "add gone"]).unwrap();
+
+        g.run(&["checkout", "-q", "-b", "side"]).unwrap();
+        std::fs::write(s.0.join("logo.ico"), b"BIN\x00SIDE\x01").unwrap();
+        std::fs::write(s.0.join("a.txt"), "side\n").unwrap();
+        std::fs::write(s.0.join("gone.txt"), "modified\n").unwrap();
+        g.run(&["add", "-A"]).unwrap();
+        g.run(&["commit", "-qm", "side"]).unwrap();
+
+        g.run(&["checkout", "-q", "main"]).unwrap();
+        std::fs::write(s.0.join("logo.ico"), b"BIN\x00MAIN\x02").unwrap();
+        std::fs::write(s.0.join("a.txt"), "main\n").unwrap();
+        g.run(&["rm", "-q", "gone.txt"]).unwrap();
+        g.run(&["add", "-A"]).unwrap();
+        g.run(&["commit", "-qm", "main"]).unwrap();
+
+        // The stop IS the fixture; nonzero exit expected.
+        let _ = g.exec(&["rebase", "--onto", "main", "main~1", "side"]).unwrap();
+        assert!(
+            g.status(false).unwrap().iter().any(|e| e.kind == StatusKind::Unmerged),
+            "the rebase must have stopped on conflicts"
+        );
+
+        assert!(g.conflict_is_binary("logo.ico").unwrap(), "NUL-bearing blobs are binary");
+        assert!(!g.conflict_is_binary("a.txt").unwrap(), "a text conflict is not");
+        assert!(
+            !g.conflict_is_binary("gone.txt").unwrap(),
+            "modify/delete has no stage pair -- not-binary, never an error"
+        );
+        // An unconflicted path simply has no stages: same honest false.
+        assert!(!g.conflict_is_binary("no-such-file").unwrap());
+
+        let _ = g.exec(&["rebase", "--abort"]);
     }
 }

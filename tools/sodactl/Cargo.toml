@@ -22,4 +22,8 @@ license = "LGPL-2.1-or-later"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# The ledger writes back INTO the live manifest, which is ~70% comments; a
+# `toml` round-trip would destroy every one of them. Already in the lockfile as
+# `toml`'s own dependency, so this adds zero packages.
+toml_edit = "0.22"
 anyhow = "1"

@@ -1,6 +1,6 @@
 # sodactl
 
-A read-only auditor for the SpritzWine branch model.
+An auditor and plan-first release driver for the SpritzWine branch model.
 
 SpritzWine's release model is a stack of hand-authored **tier** branches that get
 replayed onto upstream wine bases to produce **consumer** branches, which the
@@ -10,8 +10,15 @@ moved, a pinned consumer SHA can be force-pushed out of existence. All of those
 failures are silent until a fresh clone or a CI runner hits them, which is the
 worst possible moment.
 
-`sodactl` reads the two repositories and reports what is inconsistent. **It never
-writes.** Every mutating verb is still a shell command it prints for you to run.
+`sodactl status`/`check`/`rr-health`/`explain`, the TUI and the MCP surface read
+the two repositories and report what is inconsistent — those paths never write.
+The **write verbs** (`restack`, `stitch`, `regen`, `tag`, `pin`, `rr-gc`,
+`resume`, `undo`) DO rewrite branches and commit — behind a plan/apply split:
+the default invocation prints a reviewable plan and changes nothing; `--apply`
+re-derives the plan, refuses on drift, writes a journal and never-pruned backup
+refs, then executes with CAS protection where git provides it. **There is no
+push verb and there will not be one** — `sodactl push` prints the derived
+commands for Florian to run.
 
 See `docs/BRANCHING.md` in the superproject for the model itself; this tool
 encodes that document and is not a substitute for it.
@@ -27,7 +34,7 @@ tiers a stitch linearizes, and which base a consumer is poured onto. It does
 are observations, and every one of them is derived live.
 
 The reason is not tidiness. A hand-written count is a lie waiting to happen while
-a destructive operation depends on it — and the write verbs (v2/v3, below) are
+a destructive operation depends on it — and the write verbs (below) are
 destructive by nature: `rebase --onto`, `checkout -B`, `push --force-with-lease`.
 
 ### The bug class this tool exists to avoid
@@ -112,10 +119,10 @@ sodactl --manifest tools/sodactl.toml tui
 ```
 
 A dashboard for the **failure path**: the same reconcile the CLI runs, arranged
-so you can see where to do what next. It is exactly as read-only as the rest of
-the tool — a source-grep guardrail test pins every subprocess in the crate to
-two audited read-only constructors (`git log` for the chain, `git`/`tig show`
-for inspection), so a third spawn site anywhere fails the build.
+so you can see where to do what next. The TUI itself never writes — a
+source-grep guardrail test pins every subprocess in the crate to two audited
+read-only constructors (`git log` for the chain, `git`/`tig show` for
+inspection), so a third spawn site anywhere fails the build.
 
 ### Panes
 
@@ -288,25 +295,35 @@ tracked modifications are a Blocker, unknown untracked files are Hygiene. A guar
 that fires on generated files gets disabled within a day, and then the guard
 protecting real uncommitted work is gone too.
 
-## Not yet implemented
+## The write verbs
 
-**`sodactl` is read-only in v0.** Every write verb below is unimplemented, and
-where a finding's remedy would naturally name one, it prints the manual command
-instead and says the verb does not exist. A remedy you cannot run is noise.
+**These rewrite branches and commit.** All of them are plan-by-default: run
+without `--apply` and they print numbered steps with literal argv, predicted
+ref mutations (`ref: old -> new`), backup refs and notes, then exit 0 having
+changed nothing. `--apply` re-derives the plan and refuses if it drifted from
+what was reviewed; the destructive subset (`restack`, `tag --force`, `pin`,
+`undo`, `rr-gc`) additionally asks `y/N` (or `--yes`). Every history rewrite
+first writes a journal (`.git/sodactl/journal/`) and a create-only, never-pruned
+backup ref under `refs/sodactl/backup/`, restorable via `sodactl undo`.
 
-| verb | would do | status |
-|---|---|---|
-| `restack` | rebase a tier's children onto its new tip after it moves | **v2** |
-| `stitch` | rebuild a stitch by cherry-picking its declared tier order | **v2** |
-| `regen` | pour a consumer: `rebase --onto <base> <home_base> <soda_tip>` with rerere, apply `binary_resolution` rules, write a generation ledger | **v2** — `tools/regenerate.sh` does this today |
-| `tag` | cut a release across the families | **v3** |
-| `pin` | bump the gitlink, tag it, update `.gitmodules branch=`, all in one commit | **v3** |
-| `rr gc` | prune shadowed / postimage-less / stale rr-cache entries | **v2** |
+| verb | does |
+|---|---|
+| `restack <tier>` | rebase a tier's own commits onto its parent's new tip — `<old>` is computed from the patch-id own-set, never an argument; patch-id postcondition, auto-restore on drift |
+| `stitch <name>` | rebuild a stitch: `checkout -B` from the base tier, cherry-pick the declared order, verify every tier's patch-ids landed |
+| `regen <consumer>` | pour a consumer: fetch the base's remote, seed rerere from `tools/rr-cache`, `rebase --onto`, drive conflicts through `[[binary_resolution]]` rules, then persist+commit the cache, write the `[ledger.<name>]` entry and cut a `gen/<name>/<utc>` provenance tag |
+| `tag <family> <n>` | cut `<family>-<winebase>-<n>` on the family's derived component tip; refusals protect the cut itself (`--force` overrides, preserving a re-pointed tag's old object as a backup ref) |
+| `pin <tag>` | move the wine gitlink and `.gitmodules branch=` to a TAG in one commit, after verifying the `.gitmodules` URL serves it |
+| `rr-gc` | prune postimage-less/shadowed rr-cache entries from BOTH caches, commit the prune |
+| `resume` / `undo` | continue a conflicted replay after journal verification / restore a backup ref, CAS-guarded |
+| `build` / `package` / `smoke` | exec the superproject's own lane scripts with the exit code passed through — the one documented exception to plan-default (they move no ref; `--json` is their review form). `build` gates on checkout-vs-pin (`--anyway` overrides) |
+| `push` | **prints** the derived push commands; never executes them |
+| `release <family> <n>` | the composite checklist (tag → pin → build → package → smoke → push), statuses derived live, nothing executed |
 
-The **generation ledger** `regen` would write is the missing input that makes
-`CONSUMER_CURRENCY_UNKNOWN` permanent: without a record of which tier tips a
-consumer was poured from, currency is not derivable by any means, and the tool
-says so rather than guessing.
+The **generation ledger** `regen` writes (`[ledger.<name>]` in the manifest,
+comment-preserving) is what makes consumer currency decidable: with an entry,
+`check` compares the recorded inputs against live state
+(`CONSUMER_STALE_BY_LEDGER`, `LEDGER_CONTRADICTS_TIP`, `LEDGER_CONTRADICTS_TAG`);
+without one, `CONSUMER_CURRENCY_UNKNOWN` stays the honest answer.
 
 ### Other gaps
 
@@ -350,7 +367,9 @@ says so rather than guessing.
 
 ## The git backend: hybrid by capability
 
-All git access goes through one trait, `GitRead`, with **three** implementations
+All git **reads** go through one trait, `GitRead` (writes go through `GitMut`
+in `mutate.rs` — the git binary permanently, because `index.lock` is the real
+mutex), with **three** implementations
 whose roles are named:
 
 * **`GitGix`** — gitoxide (`gix 0.85`, `default-features = false`), owning the
@@ -424,8 +443,13 @@ before any `gix` version bump; both are read-only.
 ```
 crates/sodactl-git    GitRead; GitCli (binary, the oracle) + GitGix (gitoxide)
                       + GitHybrid (production) + Differential (the harness)
-crates/sodactl-core   manifest, findings, reconcile, checks/, tags, rrcache
-crates/sodactl-cli    clap front end: status, check, rr-health, selfcheck, tui
+                      + GitMut (mutate.rs -- the ONLY mutating surface, one
+                        audited spawn site, grep-provably no push method)
+crates/sodactl-core   manifest, findings, reconcile, checks/, tags, rrcache,
+                      plan (plan/apply, journal, backups), verbs/ (one module
+                      per write verb)
+crates/sodactl-cli    clap front end: status, check, rr-health, selfcheck, tui,
+                      the write verbs (verbs.rs) and the build lanes (lanes.rs)
 crates/sodactl-tui    ratatui dashboard (no tokio; crossterm only via re-export)
 crates/sodactl-mcp    MCP surface (compiles; no entry point yet)
 ```
@@ -437,9 +461,10 @@ implementations that drifted, because hardening only ever landed on one of them.
 That is how `reapply_verdict` came to build its own `Command` without `LC_ALL=C`
 while every sibling call was locale-pinned, and how one `ahead_behind` matched a
 stderr substring the other had already abandoned. Anything that runs `git` goes
-through this crate: no code in `core`, `cli` or `mcp` spawns `git` itself (the
-one `Command::new` left outside is a test harness invoking `bash` to build a
-fixture repo), and adding one back reintroduces the mechanism, not just a line.
+through this crate: no production code in `core`, `cli` or `mcp` spawns `git`
+itself (the CLI's single audited `Command::new` runs the build-lane *scripts*,
+and the remaining spawn sites are test fixtures building scratch repos), and
+adding one back reintroduces the mechanism, not just a line.
 
 `reconcile()` is a pure function of a manifest and one `GitRead`, which is what
 makes it testable against a fake with no repository on disk. The `checks` module

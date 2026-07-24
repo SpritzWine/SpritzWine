@@ -2373,8 +2373,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
  "sodactl-git",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]

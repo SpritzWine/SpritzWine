@@ -10,10 +10,13 @@ pub mod explain;
 pub mod finding;
 pub mod graph;
 pub mod manifest;
+pub mod plan;
 pub mod present;
 pub mod reconcile;
 pub mod rrcache;
 pub mod tags;
+pub mod treestate;
+pub mod verbs;
 
 pub use checks::{Policy, SkewPolicy, Workspace};
 pub use sodactl_git::{GitCli, GitRead};

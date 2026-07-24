@@ -470,11 +470,19 @@ mod tests {
     }
 
     /// `explain`'s catalogue is written beside the emitters, not inside them, so
-    /// it can drift. This checks the direction that is checkable: every
-    /// documented code must appear somewhere in the emitting source. The reverse
-    /// (every emitted code is documented) cannot be checked without parsing
-    /// Rust, which is why a new finding code belongs in the same commit as its
-    /// catalogue entry.
+    /// it can drift -- in both directions, and both are checked here.
+    ///
+    /// Forward: every documented code must appear somewhere in the emitting
+    /// source (twice: the entry itself plus an emitter). Reverse: every code
+    /// literal handed to `Finding::new` in `sodactl-core` must have a catalogue
+    /// entry. The reverse scan leans on a style invariant -- the code literal
+    /// sits on the call's own line or the one directly after it -- and ASSERTS
+    /// that invariant at every call site, so a formatting drift fails the build
+    /// loudly instead of silently skipping the site.
+    ///
+    /// This crate's `rr.rs` emits its one code through `RrFinding`, not
+    /// `Finding::new`, so only the forward direction covers it -- enough to
+    /// keep its entry from going stale.
     #[test]
     fn catalogue_covers_emitted_codes() {
         let mut files = Vec::new();
@@ -493,6 +501,66 @@ mod tests {
         assert!(
             orphans.is_empty(),
             "documented in explain::CATALOGUE but emitted by nothing: {orphans:?}"
+        );
+
+        // Reverse direction. The pattern is built from fragments so neither
+        // this test's own source nor the prose in `explain.rs` that quotes the
+        // invariant can match; comment lines are skipped for the same reason.
+        //
+        // Only `sodactl-core` is scanned: it is the only crate constructing
+        // `Finding`s through this call.
+        let call = "Finding::".to_string() + "new(";
+        // The first argument as written at every site: a SHOUTING_SNAKE string
+        // literal, opening right after the paren or at the start of the next
+        // line (rustfmt's two renderings of the call).
+        fn code_at(s: &str) -> Option<&str> {
+            let body = s.trim_start().strip_prefix('"')?;
+            let lit = &body[..body.find('"')?];
+            (!lit.is_empty() && lit.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+                .then_some(lit)
+        }
+
+        let mut core_files = Vec::new();
+        rs_files(&crate_src("sodactl-core"), &mut core_files);
+        let mut sites = 0usize;
+        let mut undocumented = Vec::new();
+        for f in &core_files {
+            let text = std::fs::read_to_string(f).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                let code_line = line.trim_start();
+                if code_line.starts_with("//") {
+                    continue;
+                }
+                let Some(at) = code_line.find(&call) else { continue };
+                sites += 1;
+                let lit = code_at(&code_line[at + call.len()..])
+                    .or_else(|| code_at(lines.get(n + 1).copied().unwrap_or("")));
+                // The asserted style invariant: a site the scan cannot read is
+                // a build failure, never a skip -- a skip is how this direction
+                // would quietly stop covering new emitters.
+                let Some(lit) = lit else {
+                    panic!(
+                        "{}:{}: no SHOUTING_SNAKE code literal on the call line or the \
+                         next -- the reverse catalogue scan relies on that style; keep \
+                         the literal there or teach the scan the new shape",
+                        f.display(),
+                        n + 1
+                    );
+                };
+                if crate::explain::lookup(lit).is_none() {
+                    undocumented.push(format!("{lit} ({}:{})", f.display(), n + 1));
+                }
+            }
+        }
+        // A scan that finds (almost) nothing means the extraction broke, not
+        // that the emitters vanished. 30 is far below the real count and far
+        // above zero -- it only has to catch "the walk or the pattern died".
+        assert!(sites > 30, "the reverse scan found only {sites} call sites -- it is broken");
+        assert!(
+            undocumented.is_empty(),
+            "passed to Finding::new but missing from explain::CATALOGUE:\n{}",
+            undocumented.join("\n")
         );
     }
 }

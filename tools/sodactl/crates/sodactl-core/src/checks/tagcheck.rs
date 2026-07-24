@@ -143,7 +143,7 @@ pub fn check(m: &Manifest, git: &dyn GitRead, p: &Policy) -> anyhow::Result<Vec<
                     seen.len(),
                     stale.join(", ")
                 ),
-                format!("re-stitch soda-full by hand (`sodactl stitch` is NOT implemented, v2), then: git -C wine tag {component}-<base>-<n+1> soda-full   # tag the NEW stitch; never move `{name}`"),
+                format!("sodactl stitch soda-full --apply && sodactl tag {component} <n+1> --apply   # tag the NEW stitch; never move `{name}`"),
             ));
         }
     }

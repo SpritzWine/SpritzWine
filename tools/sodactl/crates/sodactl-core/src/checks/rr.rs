@@ -55,7 +55,7 @@ pub fn check(m: &Manifest, ws: &Workspace, p: &Policy) -> anyhow::Result<Vec<Fin
                     "rr-cache entry `{}` looks (by preimage content) like a conflict in `{path}`, which an unscoped [[binary_resolution]] rule already decides -- if so it can never be consulted",
                     e.id
                 ),
-                "confirm against the preimage, then prune by hand: rm -r <rr-cache>/<id>   # `sodactl rr gc` is NOT implemented (v2)".to_string(),
+                "confirm against the preimage, then `sodactl rr-gc --apply` prunes it (shadowed entries go regardless of age); or by hand: rm -r <rr-cache>/<id>".to_string(),
             ));
             continue;
         }
@@ -74,7 +74,7 @@ pub fn check(m: &Manifest, ws: &Workspace, p: &Policy) -> anyhow::Result<Vec<Fin
             Severity::Drift,
             &e.id,
             format!("rr-cache entry `{}` has a preimage but no postimage -- the conflict is recorded, the resolution is not{hint}", e.id),
-            "reproduce the conflict and re-resolve so a postimage is captured, or prune by hand: rm -r <rr-cache>/<id>   # `sodactl rr gc` is NOT implemented (v2)".to_string(),
+            "reproduce the conflict and re-resolve so a postimage is captured; `sodactl rr-gc --apply` prunes entries like this once they are 30 days old (--older-than to tune)".to_string(),
         ));
     }
 

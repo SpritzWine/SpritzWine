@@ -188,9 +188,12 @@ fn check_tiers<G: GitRead>(m: &Manifest, git: &G, r: &mut Report) -> anyhow::Res
                     t.name,
                     parent_label(m, &t.parent, &parent_ref)
                 ),
+                // The verb, not the raw rebase: `restack` computes `<old>`
+                // (the placeholder here used to invite typing it from memory,
+                // the exact commit-duplication trap) and patch-id-verifies the
+                // result, restoring from a backup ref on drift.
                 format!(
-                    "git rebase --onto {parent} <old-{child}-base> {child}   # then re-stitch and re-pour anything downstream",
-                    parent = parent_ref,
+                    "sodactl restack {child} --apply   # computes the old base, verifies by patch-id; then re-stitch and re-pour anything downstream",
                     child = t.name
                 ),
             ));
@@ -304,7 +307,10 @@ fn check_stitches<G: GitRead>(m: &Manifest, git: &G, r: &mut Report) -> anyhow::
                 Severity::Drift,
                 &s.name,
                 format!("stitch `{}` does not exist", s.name),
-                format!("build it by hand: git -C wine checkout -B {} {} && git -C wine cherry-pick ...   # `sodactl stitch` is NOT implemented (v2)", s.name, s.base_tier),
+                // The verb, not the raw commands: `stitch` derives each
+                // tier's own range (the same stale-`<old>` trap restack
+                // closes) and patch-id-verifies the result.
+                format!("sodactl stitch {} --apply   # rebuilds it from `{}` in the declared order, patch-id-verified", s.name, s.base_tier),
             ));
             continue;
         }
@@ -326,7 +332,7 @@ fn check_stitches<G: GitRead>(m: &Manifest, git: &G, r: &mut Report) -> anyhow::
                     "`{}` no longer descends from its base tier `{}` -- patch-id comparison against it would silently under-report missing commits, so staleness was NOT checked",
                     s.name, s.base_tier
                 ),
-                format!("rebuild it on `{}` by hand: git -C wine checkout -B {} {} && cherry-pick the declared order   # `sodactl stitch` is NOT implemented (v2)", s.base_tier, s.name, s.base_tier),
+                format!("sodactl stitch {} --apply   # rebuilds it on `{}` from scratch (a stitch is derived; nothing in it is worth salvaging)", s.name, s.base_tier),
             ));
             continue;
         }
@@ -388,7 +394,7 @@ fn check_stitches<G: GitRead>(m: &Manifest, git: &G, r: &mut Report) -> anyhow::
                             n => format!(" ({n} of them unconfirmed -- reapply conflicted)"),
                         }
                     ),
-                    format!("re-cherry-pick `{}` in the declared order by hand   # `sodactl stitch` is NOT implemented (v2)", s.name),
+                    format!("sodactl stitch {} --apply   # re-stitches in the declared order; restack any stale tiers first or it linearises stale inputs", s.name),
                 ));
             }
         }

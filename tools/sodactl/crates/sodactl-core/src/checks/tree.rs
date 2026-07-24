@@ -8,9 +8,10 @@
 //! Blocker, unknown untracked files are Hygiene, and allowlisted build products
 //! are silent, not even counted.
 
-use super::{glob_match, Workspace};
+use super::Workspace;
 use crate::finding::{Finding, Severity};
 use crate::manifest::Manifest;
+use crate::treestate;
 
 pub fn check(m: &Manifest, ws: &Workspace) -> anyhow::Result<Vec<Finding>> {
     let mut f = Vec::new();
@@ -19,61 +20,26 @@ pub fn check(m: &Manifest, ws: &Workspace) -> anyhow::Result<Vec<Finding>> {
     // half-done. `regenerate.sh` exits 1 leaving the tree mid-rebase AND
     // detached.
     //
-    // The gitdir must be RESOLVED, not guessed: `wine/.git` is a file holding
-    // `gitdir: ../.git/modules/wine`, so a check that stats `wine/.git/rebase-merge`
-    // finds nothing and passes forever.
+    // The probe itself lives in `treestate` because `plan::preflight` refuses
+    // on the same observation -- a probe fixed here but not there lets a verb
+    // rebase over exactly this state. The resolved-gitdir requirement and the
+    // rich narrative are documented on the helper.
     let gd = ws.wine.git_dir()?;
-    let in_flight: Vec<&str> = ["rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "MERGE_RR", "sequencer"]
-        .into_iter()
-        .filter(|n| gd.join(n).exists())
-        .collect();
-    if !in_flight.is_empty() {
-        // Report richly: which rebase, how far in. A bare boolean tells you to
-        // stop without telling you what you are in the middle of.
-        let onto = read_trimmed(&gd.join("rebase-merge/onto"));
-        let head_name = read_trimmed(&gd.join("rebase-merge/head-name"));
-        let progress = match (read_trimmed(&gd.join("rebase-merge/msgnum")), read_trimmed(&gd.join("rebase-merge/end"))) {
-            (Some(n), Some(e)) => format!(", at step {n}/{e}"),
-            _ => String::new(),
-        };
-        let what = match (head_name, onto) {
-            (Some(h), Some(o)) => format!(" replaying {h} onto {o}{progress}"),
-            _ => progress,
-        };
+    if let Some(fl) = treestate::in_flight(&gd) {
         f.push(Finding::new(
             "REBASE_IN_FLIGHT",
             Severity::Blocker,
             &ws.wine_path,
-            format!("a replay is in progress in the wine submodule ({}){what} -- no operation may touch refs until it is finished or aborted", in_flight.join(", ")),
+            format!("a replay is in progress in the wine submodule ({}){} -- no operation may touch refs until it is finished or aborted", fl.markers.join(", "), fl.narrative),
             "git -C wine rebase --continue, or git -C wine rebase --abort".to_string(),
         ));
     }
 
-    // D1 -- split by kind.
-    let mut tracked = Vec::new();
-    let mut unknown_untracked = Vec::new();
-    for e in ws.wine.status(true)? {
-        // The allowlist applies to BOTH kinds, and restricting it to untracked
-        // paths made it inert exactly where the manifest says it is needed.
-        // `configure` is the allowlist's first non-stamp entry AND is tracked in
-        // upstream wine (the manifest's own `binary_resolution` note says so),
-        // so the moment the build runs autoreconf it becomes ` M configure`,
-        // takes the tracked branch, and raises the SUBMODULE_DIRTY Blocker the
-        // allowlist exists to prevent. Silent today only because `configure`
-        // happens to be unmodified right now.
-        //
-        // This does not weaken the guard: the whole design here is that a
-        // DECLARED build product is silent whatever its status, and an
-        // undeclared tracked modification is still an unconditional Blocker.
-        if m.build_artifacts.iter().any(|g| glob_match(g, &e.path)) {
-            continue;
-        }
-        if e.is_untracked() {
-            unknown_untracked.push(e.path);
-        } else {
-            tracked.push(e.path);
-        }
-    }
+    // D1 -- split by kind. The split (and the reason the allowlist applies to
+    // BOTH kinds -- the tracked-`configure` story) lives in
+    // `treestate::split_dirty`, shared with the verbs' preflight refusal.
+    let treestate::DirtySplit { tracked, unknown_untracked } =
+        treestate::split_dirty(ws.wine.status(true)?, &m.build_artifacts);
     if !tracked.is_empty() {
         f.push(Finding::new(
             "SUBMODULE_DIRTY",
@@ -142,8 +108,4 @@ pub fn check(m: &Manifest, ws: &Workspace) -> anyhow::Result<Vec<Finding>> {
     }
 
     Ok(f)
-}
-
-fn read_trimmed(p: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(p).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }

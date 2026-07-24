@@ -101,6 +101,22 @@ impl TagName {
     }
 }
 
+/// The wine base carried inside an arbitrary ref name or describe string:
+/// `wine-11.13` -> `11.13`, `valve-wine/proton_11.0` -> `11.0`,
+/// `wine-11.12-79-g1bb0da91a5e` -> `11.12`.
+///
+/// This is how `sodactl tag` DERIVES the `<winebase>` field of a new tag name
+/// instead of declaring it -- the plan doc's rule, and the mechanism that
+/// caught BRANCHING.md saying 11.12 while the shipped tag said 11.13. The scan
+/// is over `-`/`_`/`/`-separated tokens because those are the three separators
+/// the project's ref grammar actually uses; the first token that is a wine
+/// base wins (a name legitimately carries at most one). `None` is the honest
+/// answer for a base ref that names no wine version (a fixture's `master`),
+/// and the caller must refuse to invent a tag name from it.
+pub fn wine_base_of(name: &str) -> Option<String> {
+    name.split(['-', '_', '/']).find(|t| is_wine_base(t)).map(str::to_string)
+}
+
 /// `11.12` -- exactly two dot-separated runs of digits.
 fn is_wine_base(s: &str) -> bool {
     let mut parts = s.split('.');
@@ -177,6 +193,18 @@ mod tests {
         assert!(TagName::parse("spritzwine-11.0-0.2.0", &aliases()).release_key().is_none());
         assert!(TagName::parse("soda-all", &aliases()).release_key().is_none());
         assert!(TagName::parse("wine-11.13", &aliases()).release_key().is_none());
+    }
+
+    /// `wine_base_of` over the three real shapes it must serve (consumer base
+    /// refs, the home base's describe string) plus the honest-None case.
+    #[test]
+    fn wine_base_is_derived_never_guessed() {
+        assert_eq!(wine_base_of("wine-11.13").as_deref(), Some("11.13"));
+        assert_eq!(wine_base_of("valve-wine/proton_11.0").as_deref(), Some("11.0"));
+        assert_eq!(wine_base_of("wine-11.12-79-g1bb0da91a5e").as_deref(), Some("11.12"));
+        // A base that names no wine version yields None, not an invented one.
+        assert_eq!(wine_base_of("master"), None);
+        assert_eq!(wine_base_of("fixture-fork-point"), None);
     }
 
     /// The load-bearing test: six thousand foreign tags must stay silent.

@@ -31,6 +31,38 @@ pub struct Manifest {
     /// Declared judgement calls. `None` -- the section absent entirely -- is the
     /// documented fallback to `checks::Policy::default()`; see `PolicyDecl`.
     pub policy: Option<PolicyDecl>,
+    /// The generation ledger: `[ledger.<consumer>]`, written by `sodactl
+    /// regen` on success, never hand-edited. Source of truth #3 -- a CLAIM to
+    /// be verified against git, never a fact (`checks/consumers.rs` does the
+    /// verifying, and emits LEDGER_CONTRADICTS_* when the claim fails).
+    ///
+    /// A top-level table keyed by consumer name, NOT a field under
+    /// `[[consumer]]`: array-of-tables entries are positional, so a surgical
+    /// `toml_edit` write would have to find "the [[consumer]] whose name is X"
+    /// by scanning -- and a scan that miscounts writes the ledger onto the
+    /// wrong consumer. `[ledger.<name>]` is addressable by the one key that
+    /// identifies it.
+    #[serde(default)]
+    pub ledger: BTreeMap<String, Generation>,
+}
+
+/// One recorded generation: the inputs a consumer was last poured from and
+/// what came out. Every field is an observation frozen at pour time; comparing
+/// them to live values is what makes consumer currency decidable at all.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Generation {
+    /// `2026-07-24T12:00:00Z` -- when the pour finished.
+    pub at: String,
+    /// What the declared base resolved to.
+    pub base_commit: String,
+    /// What the declared soda tip resolved to.
+    pub soda_commit: String,
+    /// The home base the replay excluded (the manifest constant at pour time).
+    pub home_base: String,
+    /// The consumer tip the pour produced.
+    pub result: String,
+    /// The sodactl version that wrote this entry.
+    pub sodactl: String,
 }
 
 /// The `[policy]` section: the decisions that are not facts about the graph.
@@ -215,6 +247,169 @@ pub fn workspace_root(manifest: &std::path::Path) -> std::path::PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(std::path::Path::new("."))
         .to_path_buf()
+}
+
+/// Write (or overwrite) one `[ledger.<consumer>]` entry into the manifest
+/// file, preserving everything else byte-for-byte.
+///
+/// `toml_edit`, never `toml`: the live manifest is ~70% comments, every one a
+/// recorded decision, and a `toml::to_string` round-trip would erase them all
+/// while still producing a file that parses -- the worst kind of data loss,
+/// the invisible kind. This is the ONLY manifest write in the workspace; the
+/// `[[binary_resolution]]` offer in regen's conflict guidance deliberately
+/// prints a snippet instead of calling this, because a rule is a reviewed
+/// policy decision and a ledger entry is a recorded observation.
+///
+/// The rewritten text is re-parsed as a `Manifest` BEFORE the file is
+/// touched: a write that would leave the manifest unreadable to the next
+/// invocation must fail here, with the old file intact.
+pub fn write_ledger_entry(
+    path: &std::path::Path,
+    consumer: &str,
+    g: &Generation,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading manifest {}", path.display()))?;
+    let mut doc: toml_edit::DocumentMut =
+        text.parse().with_context(|| format!("parsing manifest {}", path.display()))?;
+
+    let fresh = !doc.contains_key("ledger");
+    let ledger = doc
+        .entry("ledger")
+        .or_insert_with(|| {
+            // Implicit: the file gains exactly `[ledger.<name>]`, never a bare
+            // `[ledger]` header with nothing under it.
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            toml_edit::Item::Table(t)
+        })
+        .as_table_mut()
+        .with_context(|| "`ledger` exists in the manifest but is not a table".to_string())?;
+
+    // Whatever comment sits above the entry being replaced -- the section
+    // banner below on a re-pour, or anything a human wrote there despite the
+    // banner -- travels as the OLD table's prefix decor and would vanish with
+    // it. Measured: the banner survived exactly one overwrite without this.
+    let kept_prefix = ledger
+        .get(consumer)
+        .and_then(|it| it.as_table())
+        .and_then(|t| t.decor().prefix())
+        .and_then(|raw| raw.as_str())
+        .map(str::to_string);
+
+    let mut entry = toml_edit::Table::new();
+    // Field order mirrors the `Generation` declaration / the plan doc schema.
+    entry["at"] = toml_edit::value(&g.at);
+    entry["base_commit"] = toml_edit::value(&g.base_commit);
+    entry["soda_commit"] = toml_edit::value(&g.soda_commit);
+    entry["home_base"] = toml_edit::value(&g.home_base);
+    entry["result"] = toml_edit::value(&g.result);
+    entry["sodactl"] = toml_edit::value(&g.sodactl);
+    if fresh {
+        // The banner the plan doc's example manifest carries; written once,
+        // when the section first appears, then preserved by the carry above.
+        entry.decor_mut().set_prefix(
+            "\n# ---- the ledger. Written by `sodactl regen` on success. Never hand-edited. ----\n",
+        );
+    } else if let Some(p) = kept_prefix {
+        entry.decor_mut().set_prefix(p);
+    }
+    ledger.insert(consumer, toml_edit::Item::Table(entry));
+
+    let out = doc.to_string();
+    Manifest::parse(&out)
+        .with_context(|| "the ledger write would leave the manifest unparseable -- nothing was written".to_string())?;
+    std::fs::write(path, out).with_context(|| format!("writing manifest {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+
+    const COMMENTED: &str = r#"# top-of-file banner: a recorded decision
+schema = 1
+# build products, placed before the first table for TOML scoping
+build_artifacts = ["configure"]   # inline: the autoreconf story
+
+[repo]
+superproject = "."
+wine = "wine"   # the submodule path
+
+# the one constant that is NOT derivable
+[repo.home_base]
+commit = "abc"
+describes = "d"
+derivation = "x"
+
+[[consumer]]
+name = "spritzwine"
+base = "wine-11.13"
+soda_tip = "soda-full"
+"#;
+
+    fn generation(result: &str) -> Generation {
+        Generation {
+            at: "2026-07-24T12:00:00Z".into(),
+            base_commit: "base1111111".into(),
+            soda_commit: "soda2222222".into(),
+            home_base: "abc".into(),
+            result: result.into(),
+            sodactl: "0.1.0".into(),
+        }
+    }
+
+    /// THE mandatory property: a ledger write must not cost a single comment.
+    /// The live manifest is ~70% comments and every one is a recorded
+    /// decision; the write path that erased them would still parse cleanly,
+    /// which is why this is a test and not a hope.
+    #[test]
+    fn a_ledger_write_preserves_every_comment_and_parses_back() {
+        let dir = std::env::temp_dir()
+            .join(format!("sodactl-ledger-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sodactl.toml");
+        std::fs::write(&path, COMMENTED).unwrap();
+
+        write_ledger_entry(&path, "spritzwine", &generation("res3333333")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for comment in [
+            "# top-of-file banner: a recorded decision",
+            "# build products, placed before the first table for TOML scoping",
+            "# inline: the autoreconf story",
+            "# the submodule path",
+            "# the one constant that is NOT derivable",
+        ] {
+            assert!(text.contains(comment), "comment lost by the ledger write: {comment}\n{text}");
+        }
+        assert!(text.contains("[ledger.spritzwine]"), "{text}");
+        assert!(text.contains("Never hand-edited"), "the section banner: {text}");
+
+        let m = Manifest::parse(&text).unwrap();
+        assert_eq!(m.ledger.get("spritzwine").unwrap(), &generation("res3333333"));
+
+        // Overwrite in place: a re-pour UPDATES the entry, it does not stack a
+        // duplicate table (which would be a parse error) or a second banner.
+        write_ledger_entry(&path, "spritzwine", &generation("res4444444")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("[ledger.spritzwine]").count(), 1);
+        assert_eq!(text.matches("Never hand-edited").count(), 1);
+        let m = Manifest::parse(&text).unwrap();
+        assert_eq!(m.ledger["spritzwine"].result, "res4444444");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hard gate's parsing half: a manifest with no ledger yields an
+    /// EMPTY map -- absence stays absence, so every no-ledger code path is
+    /// reachable exactly as before the field existed.
+    #[test]
+    fn a_manifest_without_a_ledger_parses_to_an_empty_map() {
+        let m = Manifest::parse(COMMENTED).unwrap();
+        assert!(m.ledger.is_empty());
+    }
 }
 
 #[cfg(test)]

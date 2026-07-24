@@ -42,11 +42,12 @@ impl Ctx {
             .with_context(|| format!("reading manifest {}", manifest_path.display()))?;
         let manifest = Manifest::parse(&text).context("parsing manifest")?;
 
-        let root = manifest_path
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+        // THROUGH core's `workspace_root`, not a local `parent().parent()`:
+        // the core helper carries the load-bearing empty-path filter (a
+        // relative `tools/sodactl.toml` derives `Some("")`, not `None`, and
+        // `""` as a cwd is ENOENT). This copy lacked it -- the exact drift the
+        // doc comment above promises never happens.
+        let root = sodactl_core::workspace_root(&manifest_path);
         let git = GitHybrid::new(root.join(&manifest.repo.wine));
         let policy = Policy::from_manifest(&manifest);
 
