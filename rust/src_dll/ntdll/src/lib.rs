@@ -10,5 +10,6 @@
 //! other Wine dlls), so `libwine_ntdll.so` builds standalone and can be linked into
 //! ntdll without a circular dependency.
 
+pub mod qpc;
 pub mod status;
 pub mod system;

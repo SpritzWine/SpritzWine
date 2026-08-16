@@ -59,6 +59,7 @@ pub mod cleanup_group;
 pub mod exports;
 pub mod heap;
 pub mod io_queue;
+pub mod qpc;
 pub mod rtl_compress;
 pub mod status;
 pub mod threadpool;
