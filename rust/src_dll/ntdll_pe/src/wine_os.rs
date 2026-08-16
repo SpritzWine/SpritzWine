@@ -11,7 +11,7 @@ use crate::io_queue::IoOs;
 use crate::threadpool::{IoStatusBlock, PoolOs};
 use crate::wait_queue::WaitOs;
 use core::ffi::c_void;
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 
 type Handle = *mut c_void;
 
@@ -154,11 +154,19 @@ impl PoolOs for WineOs {
     }
 
     fn now_mono_100ns(&self) -> i64 {
-        // wine's performance counter runs at 10 MHz (100ns ticks), matching the
-        // C threadpool's mixing of perf-counter values with 100ns timeouts.
+        // A QPC tick is not necessarily 100 ns (with the TSC-backed bypass the
+        // frequency is tsc_hz >> 10), so rescale through the reported
+        // frequency, cached after the first call — it is constant per session.
+        static QPC_FREQ: AtomicI64 = AtomicI64::new(0);
         let mut counter: i64 = 0;
-        unsafe { NtQueryPerformanceCounter(&mut counter, core::ptr::null_mut()) };
-        counter
+        let mut freq = QPC_FREQ.load(Ordering::Relaxed);
+        if freq == 0 {
+            unsafe { NtQueryPerformanceCounter(&mut counter, &mut freq) };
+            QPC_FREQ.store(freq, Ordering::Relaxed);
+        } else {
+            unsafe { NtQueryPerformanceCounter(&mut counter, core::ptr::null_mut()) };
+        }
+        (counter as i128 * 10_000_000 / freq as i128) as i64
     }
     fn now_system_100ns(&self) -> i64 {
         let mut time: i64 = 0;

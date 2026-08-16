@@ -1,0 +1,9 @@
+# Pin the toolchain for everything under rust/ (workspace AND the
+# workspace-excluded *_pe crates): the PE staticlibs need the
+# *-pc-windows-gnullvm std components, which are installed for stable but not
+# necessarily for whatever the machine's rustup default currently is (a
+# nightly default silently breaks build.sh step 3 otherwise). rustup
+# auto-installs the listed targets on first use.
+[toolchain]
+channel = "stable"
+targets = ["i686-pc-windows-gnullvm", "x86_64-pc-windows-gnullvm"]
