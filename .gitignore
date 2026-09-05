@@ -30,3 +30,12 @@ rust/src_lib/generated/
 # synthetic repo -- mkfixture.sh rebuilds it in <1s, so it is never committed.
 tools/sodactl/target/
 tools/sodactl/tests/fixtures/
+
+# Obsidian second-brain vault (local knowledge store; drop this line to share it)
+.second-brain/
+
+.vibe/
+
+.opencode/
+
+.claude/
