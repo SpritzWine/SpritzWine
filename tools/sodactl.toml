@@ -73,6 +73,40 @@ name = "soda-branding"
 parent = "soda-core"
 remote = "codeberg"
 
+# Parented on soda-core so `spritzvalve` can take the CRT fixes: verified via
+# `sodactl regen spritzvalve` (plan) that its pour replays only 4 commits,
+# soda-build + soda-core + soda-branding -- it does NOT take soda-ntdll.
+#
+# As built, this tier has NO reference of any kind into ntdll --
+# `_ReportUnobservedException` logs and terminates in place -- so the edge is
+# honest today. No report sink exists yet; do not read one into this comment.
+#
+# If the crash-report seam does land, do NOT re-parent this tier and do NOT invert
+# the edge. `parent` here is replay geometry, not dependency, and the dependency
+# could only ever run crt -> ntdll: ntdll is the bottom of the DLL stack and
+# cannot import the C++ runtime. Put the coupling commit in soda-ntdll instead, so
+# crt stays standalone for consumers that lack ntdll, and express the "after" in
+# the stitch order by moving soda-crt ahead of soda-ntdll -- the same way
+# soda-ntdll and soda-fsync already order against each other. `sodactl restack`
+# exists if that judgement turns out wrong.
+[[tier]]
+name = "soda-crt"
+parent = "soda-core"
+remote = "codeberg"
+
+# Its own tier, not a commit on soda-ntdll, by BRANCHING.md rule 1 (a distinct
+# consumer set): soda-ntdll is spritzwine-only, but the QPC user-mode bypass is a
+# broad low-level perf path BOTH glasses want -- so it must be poured onto the
+# Valve base too, which soda-ntdll deliberately never is. Named broadly so future
+# cross-base perf work (e.g. the leaf-syscall XSTATE fast path) lands here without
+# a fresh tier each time. Touches dlls/ntdll/unix + the audio timer loops, so the
+# cross-base pour resolves against the Valve base's NTSTATUS audio loops via
+# rr-cache -- same class of stitch resolution soda-ntdll already needs.
+[[tier]]
+name = "soda-perf"
+parent = "soda-core"
+remote = "codeberg"
+
 [[tier]]
 name = "soda-demo"
 parent = "soda-build"
@@ -84,7 +118,7 @@ remote = "codeberg"
 [[stitch]]
 name = "soda-full"
 base_tier = "soda-core"
-order = ["soda-glorious", "soda-ntdll", "soda-fsync", "soda-branding"]
+order = ["soda-glorious", "soda-ntdll", "soda-fsync", "soda-branding", "soda-crt", "soda-perf"]
 local_only = true
 
 # ---- consumers: GENERATED, force-pushed, never hand-edited. ----
@@ -144,7 +178,11 @@ tag_aliases = ["soda-all", "spritzwine-archive"]
 #                       soda-glorious) stitched and vetted locally and
 #                       DELIBERATELY not pushed. A consumer reaches the remote
 #                       when it passes the boot gate, not when it compiles.
-ignore_branches = ["spritzvalve-full"]
+#   spritzvalve-perf -- the same, plus soda-perf instead of soda-glorious: the
+#                       Valve boot-gate glass carrying the QPC bypass, pinned by
+#                       SpritzWine-Prater for the QPC wild-test. Local until it
+#                       passes the boot gate.
+ignore_branches = ["spritzvalve-full", "spritzvalve-perf"]
 
 # Where the tracked rerere cache lives, relative to the superproject. It is
 # committed, and `regenerate.sh` seeds `wine/.git/rr-cache` from it; the live
