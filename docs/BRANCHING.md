@@ -5,11 +5,17 @@ It used to live in the wine repo — on the `spritzwine` branch, which is a **ge
 consumer**, force-pushed on every regeneration. It would have deleted itself the first time
 anyone followed its own instructions.*
 
+*Corrected 2026-07-19, twice. First: the upstream glass has been poured — everything this
+document used to call "not yet" is now a tag you can check out; re-read "The consumers" and
+"Three bases". Second: a tier is no longer one squashed commit, and regenerating a consumer no
+longer implies tagging it; re-read "The tiers" and "Tags". If you are working from an older copy,
+those four sections are the ones that lie to you.*
+
 If you have just run `git branch -a` on the wine repo, you are looking at `soda-build`,
-`soda-core`, `soda-glorious`, `soda-ntdll`, `soda-branding`, `soda-demo`, `spritzvalve`,
-`spritzwine`, plus upstream's `master`/`stable` and Valve's `proton_*`. That looks like a
-mess. It is not; there are exactly **two kinds of branch** here, and once you know which is
-which, the rest follows.
+`soda-core`, `soda-glorious`, `soda-ntdll`, `soda-branding`, `soda-fsync`, `soda-demo`,
+`soda-full`, `spritzvalve`, `spritzwine`, plus upstream's `master`/`stable` and Valve's
+`proton_*`. That looks like a mess. It is not; there are exactly **two kinds of branch** here,
+and once you know which is which, the rest follows.
 
 **Authored branches — `soda-*`.** Hand-written feature tiers. These are the source of
 truth. You edit these.
@@ -39,6 +45,8 @@ you want to sip.
                         │                             │       │         │
                         │                             │       │         ├── soda-ntdll
                         │                             │       │         │
+                        │                             │       │         ├── soda-fsync
+                        │                             │       │         │
                         │                             │       │         └── soda-branding
                         │                             │
                         │        tools/regenerate.sh  │
@@ -48,11 +56,12 @@ you want to sip.
                                         │
        GENERATED — never edit           ▼
        ┌──────────────────────────────────────────────────────────────────┐
-       │ spritzwine    = upstream wine + the FULL mix                     │  THE ENDEAVOUR
-       │                 (build + core + glorious + ntdll + branding)     │  not poured yet
+       │ spritzwine    = wine-11.13 + the FULL mix                        │  THE ENDEAVOUR
+       │                 (build + core + glorious + ntdll + fsync +       │  poured, pinned,
+       │                  branding)                                       │  what we build
        │                                                                  │
-       │ spritzvalve   = proton_11.0  + build + core + branding           │  the necessity
-       │                                                                  │  ships today
+       │ spritzvalve   = proton_11.0 + build + core + branding            │  the necessity
+       │                                                                  │  the boot gate
        └──────────────────────────────────────────────────────────────────┘
 
        One is the point of the project. The other is how we prove the first one is safe.
@@ -61,33 +70,50 @@ you want to sip.
 Answers up front:
 
 * **Which branch do I edit?** A `soda-*` one. Always.
-* **Which do I never edit?** Any consumer — they get thrown away and rebuilt. Today that
-  means `spritzvalve`. (`spritzwine` joins the set once it's regenerated from the tiers;
-  today it is still the legacy hand-authored fork, see below.)
+* **Which do I never edit?** Any consumer — they get thrown away and rebuilt. Both of them:
+  `spritzwine` and `spritzvalve`.
 * **Which one is the project actually about?** `spritzwine` — the upstream one, with the full
-  mix. `spritzvalve` is what ships, because games only boot on Valve's tree, and a game booting
-  is the gate. Shipping first is not the same as being the point.
+  mix. It is poured, it is tagged `spritzwine-11.13-3`, and the superproject's `.gitmodules`
+  pins it: that is the tree you build today. `spritzvalve` is the Valve-based glass that proves
+  real games still boot, because games only boot on Valve's tree and a game booting is the gate.
+  Both matter; only one is the point.
 * **How do I make a new consumer?** `tools/regenerate.sh <out-branch> <wine-base> <soda-tip>`
-  in the SpritzWine superproject, then tag it.
-* **Why two bases (11.0 *and* 11.12)?** See "Two bases" below. Short version: the tiers were
-  authored on wine 11.12, and Valve ships on wine 11.0. Nobody is going to fix that
-  asymmetry — the replay exists precisely so it doesn't have to be fixed.
+  in the SpritzWine superproject. Tag it when you cut a release or pin it — not just because you
+  regenerated it. See "Tags".
+* **Why three bases (11.0, 11.12 *and* 11.13)?** See "Three bases" below. Short version: the
+  tiers are authored on wine 11.12 and never move; Valve is frozen on wine 11.0; upstream has
+  moved on to 11.13. Nobody is going to fix that asymmetry — the replay exists precisely so it
+  doesn't have to be fixed.
 
 ---
 
 ## The tiers
 
-Each tier is **exactly one squashed commit** on top of its parent tier. Not a topic branch
-with history — one commit. Check it yourself:
+A tier is a **dev branch that accumulates one concise commit per feature**, stacked on its
+parent tier. Not a topic branch you merge and not a single squashed blob either — a linear chain
+of commits, each of which says what it did. Check it yourself:
 
 ```
 $ BASE=$(git rev-parse 6260d89930c^)     # wine-11.12-79-g1bb0da91a5e
 $ git log --oneline $BASE..soda-core
+aba05bcd46e soda-core: route SHBrowseForFolder to the host folder portal
 79e58cb8a70 soda-core: HID/HidP + comdlg32 portal + avrt + win32u (lands clean on Valve)
 c69c111182f soda-build: Rust PE-staticlib build integration (configure/makedep/winegcc)
 ```
 
-Two commits, because `soda-core` sits on `soda-build`. That is the entire history.
+Read that bottom-up and it is `soda-build`'s one commit, then `soda-core`'s two: the original
+carve-out, then a feature landed on top of it. Do not take the count as a promise — it climbs
+every time a feature lands. The shape is what is promised: a straight line, no merges, and the
+first commit after `$BASE` belongs to the parent tier.
+
+It used to say *exactly one squashed commit*, and for a while that was literally true — that is
+simply how the tiers were carved out of the old hand-authored fork, one squash per tier, in one
+sitting. Keeping it true afterwards meant squashing every new feature into a commit written
+months earlier, which costs you the per-feature history — what changed, when, and why — and buys
+nothing, because the replay does not care. `rebase --onto` walks whatever commits are in the
+range; three cost the same as one. What the replay *does* care about is that the chain is linear
+and that each tier's **parent edge** is right, so a feature lands on the tier that owns the code
+it touches. Get those two right and the commit count is your business.
 
 | Tier | Parent | Contents |
 |---|---|---|
@@ -109,8 +135,10 @@ A tier is justified by exactly one of two things:
    cross-base replay hurts most (see "Stitch notes"), and you do not want that landmine
    sitting under a change to comdlg32.
 
-If a change needs neither, **squash it into an existing tier**. More tiers is not more
-structure; it is more rebase surface.
+If a change needs neither, **it becomes a new commit on an existing tier** — the one that owns
+the code it touches. Not a new tier, and not a squash into the tier's existing commits either:
+write it up as its own feature commit and leave it standing. More tiers is not more structure;
+it is more rebase surface.
 
 `soda-fsync` is rule 1 in its purest form: Valve's base *already has* fsync, so pouring it into
 `spritzvalve` would be a conflict looking for a place to happen — while an upstream base has
@@ -120,33 +148,43 @@ ntsync but no fsync, and wants it. A tier that exactly one consumer takes.
 
 ## The consumers
 
-Two glasses, and it is easy to get their order backwards — because the one that ships is not
-the one that is the point.
+Two glasses, and it is easy to get their order backwards — because the one that boots the games
+is not the one that is the point.
 
-### `spritzwine` — the endeavour (not poured yet)
+### `spritzwine` — the endeavour (poured)
 
 Soda on **upstream WineHQ wine**. No Valve patchset, no Proton, no Prater.
 
 This is what the project is *for*: Rust in Wine, tracking what Wine is becoming rather than
 what Valve froze. It carries the **full mix** — `soda-build` + `soda-core` + `soda-glorious`
-+ `soda-ntdll` + `soda-branding` + `soda-fsync` — and it is the home of everything that has nothing to do
++ `soda-ntdll` + `soda-fsync` + `soda-branding` — and it is the home of everything that has nothing to do
 with games (`soda-ntdll`'s own commit subject says "(spritzwine only)"; battery reporting
 exists because Windows programs ask how much charge is left and Wine had no good answer — no
-frametime was harmed or improved). `regenerate.sh`'s usage example is literally `spritzwine-gen`
-onto `winehq/wine-11.12`.
+frametime was harmed or improved).
 
-**It does not exist in generated form yet.** The branch carrying that name today (HEAD
-`4815a57385c`) is the *original hand-authored pre-Valve fork* on vanilla wine 11.12 — the tree
-the soda tiers were carved out of, not a tier-generated consumer. It predates the model this
-document describes. Do not build from it in that form. Once regenerated from the tiers it joins
-the never-edit set like every other consumer.
+**It exists.** Tagged **`spritzwine-11.13-3`** (commit `8bf9f2c8e83`), the tiers replayed onto
+`winehq/wine-11.13` — six commits on top of the release, which at the time was one per tier.
+Expect that number to climb as features land; the replay carries whatever the tiers hold. It
+built and it booted. The superproject pins it: `.gitmodules` says
+`branch = spritzwine-11.13-3` and the `wine` gitlink is that commit. It is a consumer like any
+other, so it is force-pushed and you never edit it.
 
-### `spritzvalve` — the necessity (what ships today)
+The old hand-authored fork is not lost — it is preserved as the annotated tag
+**`spritzwine-archive`** (`746cf095d74`, whose parent is the `4815a57385c` this document used to
+point you at). That is the pre-tier-model tree the soda tiers were carved *out of*, kept
+reachable so the carve can be audited. Do not build from it, do not branch off it. It is a
+museum piece with a ref.
 
-`proton_11.0` + `soda-build` + `soda-core` + `soda-branding`. Tagged **`spritzvalve-11.0-1`**
-(commit `8c00a2018`). This is what SpritzWine-Prater is built from; the superproject's `wine`
-submodule is pinned to that tag. Boots Avatar: Frontiers of Pandora, Risk of Rain 2, Watch
-Dogs: Legion.
+### `spritzvalve` — the necessity (the boot gate)
+
+`proton_11.0` + `soda-build` + `soda-core` + `soda-branding`. Tagged **`spritzvalve-11.0-3`**
+(commit `8c00a2018` — the same commit `spritzvalve-11.0-1` points at; the family release rolled,
+the consumer did not need re-pouring). This is what SpritzWine-Prater is built from. Boots
+Avatar: Frontiers of Pandora, Risk of Rain 2, Watch Dogs: Legion.
+
+The superproject used to pin *this* tag, because it was the only poured consumer. It no longer
+does — see above. Prater still does, and that is the correct split: Prater is the Proton
+distribution, so it wants the Proton-based glass.
 
 It carries the **thin mix** on purpose, and it exists for one reason: the project's real gate is
 *does the game boot?*, and games only boot on Valve's tree (see "Why a Valve base at all",
@@ -154,19 +192,24 @@ below). So this is the glass we can actually hand to someone, and the one that p
 does not break real software.
 
 That makes it the vehicle, not the destination. **spritzvalve is how we prove SpritzWine is
-safe; SpritzWine is the thing being proven.** Shipping first is not the same as being the point
-— and if you only read the branch list, you would conclude the opposite, which is why this
-paragraph exists.
+safe; SpritzWine is the thing being proven.** It got poured first, and for a while it was the
+only thing pinned — but arriving first is not the same as being the point, and now that the
+upstream glass is poured the ordering is finally visible in `.gitmodules` too.
 
 (It was called `spritzvalve-v1` during the proof of concept — you will still see that name in
 older superproject commits and in `regenerate.sh`'s usage comment. Same thing, renamed.)
 
 ### Consumers you don't see
 
-Richer mixes (adding `soda-glorious`, `soda-ntdll`) get stitched and vetted in local clones and
-are **deliberately not pushed**. An untested consumer sitting on the remote is an invitation for
-someone to pin it, and then you own it. A consumer appears here when it passes the boot gate,
-not when it compiles.
+Experimental mixes get stitched and vetted in local clones and are **deliberately not pushed**.
+`spritzvalve-full` (spritzvalve plus `soda-glorious`) is the standing example, and your local
+`spritzvalve` and `spritzwine` branch tips will routinely sit *ahead* of their tags for the same
+reason — a pour that has not passed the gate yet. An untested consumer sitting on the remote is
+an invitation for someone to pin it, and then you own it. A consumer appears on the remote when
+it passes the boot gate, not when it compiles.
+
+This is also why you pin **tags, not branches**. `git ls-remote --tags` is the honest list of
+what exists; `git branch -a` in your own clone is a list of what you were in the middle of.
 
 ---
 
@@ -185,21 +228,39 @@ losing game.
 
 ---
 
-## Two bases (11.0 and 11.12) — the asymmetry is real
+## Three bases (11.0, 11.12 and 11.13) — the asymmetry is real
 
-* The soda tiers are authored **on wine 11.12** (`wine-11.12-79-g1bb0da91a5e`), because that
-  is where the fork was when the work was done.
-* Every Valve wine branch — `proton_11.0`, `experimental_11.0`, `bleeding-edge` — sits **on
-  wine 11.0**. `git describe` puts `proton_11.0` at `wine-11.0-1190-g2f70bfd4d0f`. There is
-  no newer wine base inside the Proton 11 cycle. Valve is not going to hand you one.
+Three numbers, and they play three different roles. Confusing them is the classic mistake, so
+be exact:
 
-So the shipping consumer is *11.12-authored tiers replayed backwards onto an 11.0 tree*. That
-is not an accident to be cleaned up; it is the steady state, and it is why the replay is a
-script with a tracked rerere cache rather than a one-off rebase somebody did once.
+* **11.12 is the tier HOME base.** The soda tiers are authored on `wine-11.12-79-g1bb0da91a5e`,
+  because that is where the fork was when the work was done. **This one never moves.** It is the
+  exclusive start of every replayed range (see Trap 1 below). It is not anybody's shipping base;
+  it is the fixed point the tiers are measured from.
+* **11.0 is Valve's base.** Every Valve wine branch — `proton_11.0`, `experimental_11.0`,
+  `bleeding-edge` — sits on wine 11.0. `git describe` puts `proton_11.0` at
+  `wine-11.0-1190-g2f70bfd4d0f`. There is no newer wine base inside the Proton 11 cycle. Valve
+  is not going to hand you one.
+* **11.13 is where upstream is.** `spritzwine-11.13-3` is the tiers replayed onto
+  `winehq/wine-11.13`. This one *does* move — that is the entire point of the upstream glass.
+  Next release it will be 11.14, and the tiers will not have changed.
+
+So `spritzvalve` is *11.12-authored tiers replayed backwards onto an 11.0 tree*, and
+`spritzwine` is *the same tiers replayed forwards onto an 11.13 tree*. Same syrup, poured in
+two directions. Neither is an accident to be cleaned up; it is the steady state, and it is why
+the replay is a script with a tracked rerere cache rather than a one-off rebase somebody did
+once. A tier authored once now rides two bases and follows upstream for free — that is the
+whole return on the machinery.
+
+The tag naming makes the roles visible: `-11.12-` on the tier set means *authored on*, `-11.0-`
+and `-11.13-` on consumers mean *replayed onto*. See the tag table.
 
 ---
 
-## Pouring the upstream glass (the open work)
+## Pouring the upstream glass
+
+This used to be the open work. It is now the routine, and you re-run it every time upstream
+tags a release.
 
 `regenerate.sh` replays a **linear range** (`<home-base>..<soda-tip>`) onto a wine base. That is
 why `spritzvalve` is easy: `soda-branding` *is* a straight line (build → core → branding), so
@@ -211,7 +272,7 @@ of them. So before the upstream consumer can be poured, the tiers it wants must 
 a chain**, and that chain is what `regenerate.sh` gets as its soda tip:
 
 ```sh
-# 1. stitch the full mix into a linear tip (once; re-do when a tier moves)
+# 1. stitch the full mix into a linear tip (re-do whenever a tier moves)
 git checkout -B soda-full soda-core
 git cherry-pick soda-core..soda-glorious \
                 soda-core..soda-ntdll   \
@@ -219,8 +280,14 @@ git cherry-pick soda-core..soda-glorious \
                 soda-core..soda-branding
 
 # 2. pour it onto an upstream base
-tools/regenerate.sh spritzwine winehq/wine-11.12 soda-full
+tools/regenerate.sh spritzwine winehq/wine-11.13 soda-full
 ```
+
+`soda-full` is a **local scratch branch, deliberately not pushed** — it is a derived artifact,
+regenerated from the tiers in seconds, and pushing it would create a fifth thing people could
+mistake for a source of truth. The stitch *result* on the home base is what gets frozen and
+pushed, as `soda-11.12-3`. If you want the stitched chain without re-cherry-picking, check out
+that tag; if a tier has moved since, re-run step 1 and you will get a newer one.
 
 Order matters where the tiers touch the same files: `soda-ntdll` and `soda-fsync` both live in
 `dlls/ntdll/unix/` (the unwinder/threadpool vs. `sync.c`), so expect the stitch to want a
@@ -239,8 +306,11 @@ fsync.
 ```
 tools/regenerate.sh <output-branch> <wine-base-ref> <soda-tip-ref> [<soda-home-base>]
 
-# the shipping consumer:
+# the Valve-based consumer (thin mix, straight-line tip):
 tools/regenerate.sh spritzvalve valve-wine/proton_11.0 soda-branding
+
+# the upstream consumer (full mix, needs the soda-full stitch first):
+tools/regenerate.sh spritzwine winehq/wine-11.13 soda-full
 ```
 
 What it does, in order:
@@ -274,22 +344,40 @@ matching. The tiers never move. Ever.
 
 Scheme: **`<component>-<wine base>-<version>`**.
 
+First, when *not* to tag. **Regenerating a consumer is not a release.** You will re-pour
+`spritzwine` while chasing a build break, pour it again after fixing a tier, pour a throwaway
+mix to see whether it compiles — none of that earns a tag. Tags are the honest public list of
+what exists (see "Consumers you don't see"), and a list that grows every time somebody runs a
+script is not honest, it is noise. **Tag when you cut a release**, and give the whole family the
+same trailing number. Regeneration and tagging are two separate decisions; do not let the script
+make the second one for you.
+
+That rule has exactly one hard exception, and it is not negotiable — read on.
+
+The trailing number is a **family release**: everything carrying `-3` was cut together and is
+meant to be used together, whatever base it sits on.
+
 | Tag | Points at | Means |
 |---|---|---|
-| `spritzvalve-11.0-1` | `8c00a2018` | Generated consumer, replayed **onto** Proton's wine 11.0 |
-| `soda-11.12-1` | `40abbdc4f97` | The tier set, authored **on** wine 11.12 |
+| `spritzwine-11.13-3` | `8bf9f2c8e83` | Generated consumer, replayed **onto** upstream wine 11.13 — the full mix. What the superproject pins. |
+| `spritzvalve-11.0-3` | `8c00a2018` | Generated consumer, replayed **onto** Proton's wine 11.0. Same commit as `spritzvalve-11.0-1` — the family rolled, this glass did not need re-pouring. |
+| `spritzvalve-11.0-1` | `8c00a2018` | Family release 1 of the same. Kept because things pinned it. |
+| `soda-11.12-3` | `da673812a8b` | The tier set stitched into a linear chain, authored **on** wine 11.12 |
+| `soda-11.12-1` | `40abbdc4f97` | Family release 1 of the tier set, same base |
+| `soda-all` | `40abbdc4f97` | Alias of `soda-11.12-1` — the union reference, see below |
+| `spritzwine-archive` | `746cf095d74` | The legacy hand-authored fork, pre-tier-model. Not a consumer. Never build it. |
 | `spritzwine-11.0-0.2.0` | *(superproject)* | The superproject release |
 | `prater-11.0-0.2.0` | *(distribution)* | The shipped build |
 
-Note the two prepositions. `-11.0-` on a consumer means "replayed onto that base"; `-11.12-`
-on the tier set means "authored on that base". Same field, different relationship, and that
-is exactly the asymmetry from the previous section made visible in the name.
+Note the two prepositions. `-11.0-` and `-11.13-` on a consumer mean "replayed onto that base";
+`-11.12-` on the tier set means "authored on that base". Same field, different relationship, and
+that is exactly the asymmetry from the previous section made visible in the name.
 
-`soda-11.12-1` is worth one extra sentence, because it is not a tier tip: it is a single
-frozen commit whose tree is the **union** of all six tiers — the lossless-partition
-reference. If the tiers are ever re-cut, `soda-build + core + glorious + ntdll + demo +
-branding` must still reconstruct that exact tree. It is the regression test for the split
-itself.
+`soda-all` / `soda-11.12-1` is worth one extra sentence, because it is not a tier tip: it is a
+frozen point whose tree is the **union** of all six tiers — the lossless-partition reference.
+If the tiers are ever re-cut, `soda-build + core + glorious + ntdll + demo + branding` must still
+reconstruct that exact tree. It is the regression test for the split itself, which is why it
+carries a second, base-free name that will not scroll away as the family number climbs.
 
 **The operational fact, and it is the most important one in this document:** consumers are
 **force-pushed**. A superproject gitlink pinning a raw consumer SHA will break the moment the
@@ -301,8 +389,15 @@ Fetched in submodule path 'wine', but it did not contain <sha>.
 ```
 
 A tag is a ref. A ref keeps the commit reachable and fetchable forever, no matter where the
-branch moves. **Tag every consumer you pin, and pin the tag.** `.gitmodules` in the
-superproject sets `branch = spritzvalve-11.0-1` for exactly this reason.
+branch moves. **Tag every consumer you pin, and pin the tag.** That is the exception promised
+above, and it is the one place tagging is mandatory rather than a release decision: the moment a
+SHA is written into the superproject's `wine` gitlink, it needs a ref holding it alive, or the
+next regeneration turns your pin into the error above. So — routine pours, no tag; a pour that
+something pins, tag it before you pin it, even if you are not cutting a release that day.
+`.gitmodules` in the
+superproject sets `branch = spritzwine-11.13-3` for exactly this reason — and the fact that
+that line used to read `spritzvalve-11.0-1`, and the pin survived the switch without a single
+unfetchable SHA, is the policy paying for itself.
 
 ---
 
@@ -310,9 +405,10 @@ superproject sets `branch = spritzvalve-11.0-1` for exactly this reason.
 
 Things that were painful once and should not be re-learned.
 
-**Where the base and a tier disagree, the base wins.** The tiers were authored against wine
-11.12; the consumer lands on Valve's 11.0. Where upstream moved on between those two, the
-tier's version of the file is *stale*, and the correct resolution is Valve's:
+**Where the base and a tier disagree, the base wins.** This bites hardest on the *backwards*
+replay: the tiers were authored against wine 11.12, and `spritzvalve` lands them on Valve's
+11.0. Where upstream moved on between those two, the tier's version of the file is *stale*, and
+the correct resolution is Valve's:
 
 * `dlls/ntdll/Makefile.in` — Valve's 11.0 still imports `$(TOMCRYPT_PE_LIBS)` and links
   `$(UNWIND_LIBS)`; upstream had switched to `$(SYMCRYPT_PE_LIBS)` + `$(ZLIB_PE_LIBS)` and
@@ -323,6 +419,27 @@ tier's version of the file is *stale*, and the correct resolution is Valve's:
 
 These are the conflicts the tracked rr-cache exists to remember. If you resolve one, commit
 the cache.
+
+**Two conflicts rerere cannot remember — you will resolve these by hand every single time.**
+rerere records *text-content* resolutions: a hunk it has seen before, resolved the same way
+again. Neither of the following is a text hunk, so no amount of committing the cache will make
+them stop. This is not the cache failing; it is a category it structurally cannot hold. Expect
+them, resolve them, move on.
+
+* **`configure` — modify/delete, on every Valve-base replay.** Upstream wine tracks the
+  generated `configure`; `proton_11.0` does not track it at all. So `soda-build`, authored on an
+  upstream tree, modifies a file the Valve base has deleted, and git stops with *"deleted in HEAD
+  and modified in soda-build"*. **Keep it deleted** — the base wins, same rule as above.
+  `configure.ac` merges cleanly and that is the real source; `build.sh` step 2 runs
+  `[ -x configure ] || autoreconf -f` and regenerates it. Resolving this the other way commits a
+  generated file into a tree whose build system does not want one.
+* **`dlls/user32/resources/oic_winlogo.ico` — binary, in the `soda-branding` replay.** Both
+  sides changed a binary blob, so there is nothing to merge and rerere has nothing to record.
+  **Take the TIER's blob**, not the base's — the tier's *is* the SpritzWine glass icon, which is
+  the entire content of `soda-branding`. Take the base's and you have silently un-branded the
+  build. The correct blob is `2f56ce03d190c07283f19ae95bd99ccecb955336`; it is identical in
+  `soda-branding` and in every consumer tag shipped so far, so you can check your work with
+  `git ls-tree <ref> dlls/user32/resources/oic_winlogo.ico`.
 
 **`soda-ntdll` deletes `dlls/ntdll/threadpool.c` outright** — all 2797 lines; Rust replaces
 it. That is safe across the base swap for two independently-checked reasons: Valve never
