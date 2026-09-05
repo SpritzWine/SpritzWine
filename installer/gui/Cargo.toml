@@ -6,6 +6,10 @@
 #
 # libcosmic has no crates.io releases; it is pinned to a specific master commit. The
 # feature set mirrors pop-os/cosmic-app-template (a known-good windowed-app baseline).
+# The rev is kept in step with beisl-gui's (the other libcosmic app in the family), so a
+# toolkit change is met once, in both, rather than twice months apart. beisl-gui also
+# enables "wayland" for Frosted Glass; this installer draws no frosted surface, so it
+# stays on the smaller feature set.
 [package]
 name = "spritzwine-setup"
 version = "0.1.0"
@@ -23,6 +27,6 @@ spritzwine-install-core = { path = "../core" }
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
-rev = "8df1858e5d25b49e9d4e79f631ba7322c3fc6bd6"
+rev = "d4d71fd53e5ed6bd3a430089114dffa2da3cd498"
 default-features = false
 features = ["dbus-config", "tokio", "winit", "wgpu"]
