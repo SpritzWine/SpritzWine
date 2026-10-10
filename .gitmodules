@@ -1,7 +1,7 @@
 [submodule "wine"]
 	path = wine
 	url = https://codeberg.org/SpritzWine/wine.git
-	branch = spritzwine-11.13-3
+	branch = spritzwine-11.13-4
 [submodule "beisl"]
 	path = beisl
 	url = https://codeberg.org/SpritzWine/beisl.git
