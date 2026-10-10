@@ -65,7 +65,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         SDL2-devel \
         gstreamer1-devel gstreamer1-plugins-base-devel \
         gnutls-devel krb5-devel openldap-devel cups-devel unixODBC-devel \
-        dbus-devel systemd-devel libusb1-devel libxml2-devel libxslt-devel zlib-devel \
+        dbus-devel systemd-devel libusb1-devel bluez-libs-devel libxml2-devel libxslt-devel zlib-devel \
         libjpeg-turbo-devel libpng-devel libtiff-devel libwebp-devel \
     && dnf clean all
 

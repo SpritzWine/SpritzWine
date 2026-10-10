@@ -68,6 +68,13 @@ else
     for lib in LIBXRANDR LIBXRENDER LIBXI LIBXFIXES LIBGL LIBEGL LIBSDL2; do
         if grep -qa "define SONAME_$lib " "$CONFIG_H"; then ok "$lib"; else warn "$lib absent"; fi
     done
+    # Bluetooth has no SONAME on trees without the SDP lookup: wineserver compiles its
+    # AF_BTH/RFCOMM support under the header macro alone, so that is what is judged.
+    if grep -qa "define HAVE_BLUETOOTH_RFCOMM_H " "$CONFIG_H"; then
+        ok "bluetooth (RFCOMM sockets)"
+    else
+        warn "bluetooth absent -- socket(AF_BTH) will fail (bluez-libs-devel missing from the build image?)"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────────
