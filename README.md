@@ -191,6 +191,9 @@ own `panic = "abort"` profile is honored):
   - `ntdll/` — `NtPowerInformation` (`SystemPowerInformation`), called from `dlls/ntdll/unix/system.c`.
   - `comdlg32/` — the native open/save dialog via the **XDG desktop portal**, routed through a
     WoW64 unix-call thunk so it works from 32- *and* 64-bit apps.
+  - `bluetooth/` -- SDP client over a raw L2CAP socket (no libbluetooth): resolves `BT_PORT_ANY`
+    RFCOMM connects for `dlls/ntdll/unix/socket.c`; its record parser is shaped to serve
+    `winebth.sys` / `bluetoothapis` later.
 - `src_dll/<dll>_pe/`, `src_sys/<mod>_pe/` — **real-PE** crates (`no_std`, allocation-aware but
   self-contained), built for `{i686,x86_64}-pc-windows-gnullvm` and linked straight into the PE
   image: `ntdll_pe` (LZNT1 `RtlCompressBuffer`/`RtlDecompressBuffer`, threadpool, unwind),
@@ -223,7 +226,8 @@ answers the question for whatever you have checked out.
 │   │   ├── ntdll_pe/     #     …PE staticlib linked into ntdll.dll (LZNT1, threadpool)
 │   │   ├── avrt_pe/      #     …PE staticlib linked into avrt.dll (MMCSS)
 │   │   ├── hid_pe/       #     …PE staticlib linked into hid.dll (HidP_* value engine)
-│   │   └── comdlg32/     #     …libwine_comdlg32   (portal file chooser)
+│   │   ├── comdlg32/     #     …libwine_comdlg32   (portal file chooser)
+│   │   └── bluetooth/    #     …libwine_bluetooth  (SDP client, RFCOMM channel lookup)
 │   ├── src_sys/          #   drivers (kernel-pool backed)
 │   │   ├── winebus/      #     …libwine_winebus    (DualShock 4 / DualSense rumble)
 │   │   └── hidparse_pe/  #     …PE staticlib linked into hidparse.sys

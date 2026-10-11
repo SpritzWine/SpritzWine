@@ -15,6 +15,7 @@ members = [
 "src_lib",
 "src_dll/ntdll",
 "src_dll/comdlg32",
+"src_dll/bluetooth",
 "src_sys/winebus",
 "tests",
 "examples",

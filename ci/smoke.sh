@@ -142,7 +142,7 @@ done
 
 # The project's whole thesis is Rust inside Wine. If the crates silently stopped being
 # linked, everything above would still pass -- so check they are actually in the tarball.
-for so in libwine_ntdll.so libwine_comdlg32.so; do
+for so in libwine_ntdll.so libwine_comdlg32.so libwine_bluetooth.so; do
     if [ -f "$TREE/lib/wine/x86_64-unix/$so" ]; then
         ok "rust: $so bundled"
     else

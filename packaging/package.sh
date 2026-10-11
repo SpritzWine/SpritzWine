@@ -27,7 +27,7 @@ RUST_DEPS="$ROOT/rust/target/x86_64-unknown-linux-gnu/release/deps"
 UNIXDIR="lib/wine/x86_64-unix"
 
 [ -x "$ROOT/wine/wine" ] || { echo "error: Wine not built -- run ./build.sh first." >&2; exit 1; }
-for so in libwine_ntdll.so libwine_comdlg32.so; do
+for so in libwine_ntdll.so libwine_comdlg32.so libwine_bluetooth.so; do
     [ -f "$RUST_DEPS/$so" ] || { echo "error: missing $RUST_DEPS/$so -- run ./build.sh." >&2; exit 1; }
 done
 
@@ -42,13 +42,15 @@ rm -rf "$TREE/include" "$TREE/share/man"   # runtime needs neither dev headers n
 ln -sf wine "$TREE/bin/wine64"
 
 echo "==> [2/5] Bundling the Rust unix libraries"
-install -m644 "$RUST_DEPS/libwine_ntdll.so" "$RUST_DEPS/libwine_comdlg32.so" "$TREE/$UNIXDIR/"
+install -m644 "$RUST_DEPS/libwine_ntdll.so" "$RUST_DEPS/libwine_comdlg32.so" "$RUST_DEPS/libwine_bluetooth.so" "$TREE/$UNIXDIR/"
 # Optional tidy-up: rewrite the leftover absolute build-tree RUNPATH to $ORIGIN so
 # the libs are self-locating even without the launcher. Best-effort -- the
 # launcher's LD_LIBRARY_PATH already makes the tree relocatable, so patchelf is
 # not required.
 if command -v patchelf >/dev/null 2>&1; then
-    for so in ntdll comdlg32; do
+    # every unixlib that links a Rust library: localspl delivers print jobs
+    # through libwine_comdlg32.so
+    for so in ntdll comdlg32 localspl; do
         patchelf --set-rpath '$ORIGIN' "$TREE/$UNIXDIR/$so.so" 2>/dev/null || true
     done
 fi

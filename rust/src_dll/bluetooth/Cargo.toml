@@ -1,0 +1,18 @@
+[package]
+name = "wine_bluetooth"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Bluetooth SDP client for the Unix side. Speaks the Service Discovery Protocol
+# itself over a raw AF_BLUETOOTH/L2CAP socket on PSM 1 (no libbluetooth, no
+# crates). First consumer is ntdll.so (dlls/ntdll/Makefile.in,
+# `$(WINE_RUST_LDFLAGS) -Wl,-lwine_bluetooth`), which resolves BT_PORT_ANY
+# RFCOMM connects through it; winebth.sys / bluetoothapis are meant to link the
+# same .so later for record enumeration. Like wine_ntdll and wine_comdlg32 it
+# has NO dependency on the other Wine dlls, so libwine_bluetooth.so builds
+# standalone *before* Wine and links in without a build/link cycle.
+[lib]
+name = "wine_bluetooth"
+crate-type = ["cdylib"]
+path = "src/lib.rs"

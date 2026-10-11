@@ -25,6 +25,14 @@ desktop app: the host's own print dialog, the host's own queues.
   to the CUPS default queue; with neither, the spooled file is kept and
   logged. Opt out with `WINE_NO_PORTAL_PRINTDIALOG=1`.
 
+## Changed
+
+- **Bluetooth channel lookup without libbluetooth.** The SDP query behind
+  `BT_PORT_ANY` RFCOMM connects is now done by SpritzWine itself (the
+  `wine_bluetooth` crate, over a plain L2CAP socket), so `bluez-libs` is no
+  longer needed at runtime. The whole lookup is bounded at 15 seconds, where
+  the library call could block without limit.
+
 ## Known limitations
 
 - The KDE portal backend ignores an app's wish to hide "Print to File" and
