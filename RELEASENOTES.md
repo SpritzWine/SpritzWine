@@ -4,7 +4,7 @@ the top. Cutting a release only replaces that header with the version (the
 consumer tag, e.g. "SpritzWine 11.13-5") and starts a fresh unreleased section.
 -->
 
-# SpritzWine (unreleased)
+# SpritzWine 11.13-5
 
 Printing from a Windows app now looks and behaves like printing from any other
 desktop app: the host's own print dialog, the host's own queues.

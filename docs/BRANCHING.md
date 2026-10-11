@@ -73,7 +73,7 @@ Answers up front:
 * **Which do I never edit?** Any consumer — they get thrown away and rebuilt. Both of them:
   `spritzwine` and `spritzvalve`.
 * **Which one is the project actually about?** `spritzwine` — the upstream one, with the full
-  mix. It is poured, it is tagged `spritzwine-11.13-3`, and the superproject's `.gitmodules`
+  mix. It is poured, it is tagged `spritzwine-11.13-5`, and the superproject's `.gitmodules`
   pins it: that is the tree you build today. `spritzvalve` is the Valve-based glass that proves
   real games still boot, because games only boot on Valve's tree and a game booting is the gate.
   Both matter; only one is the point.
@@ -162,11 +162,11 @@ with games (`soda-ntdll`'s own commit subject says "(spritzwine only)"; battery 
 exists because Windows programs ask how much charge is left and Wine had no good answer — no
 frametime was harmed or improved).
 
-**It exists.** Tagged **`spritzwine-11.13-3`** (commit `8bf9f2c8e83`), the tiers replayed onto
-`winehq/wine-11.13` — six commits on top of the release, which at the time was one per tier.
+**It exists.** Tagged **`spritzwine-11.13-5`** (commit `43f246a05cd`), the tiers replayed onto
+`winehq/wine-11.13` -- fifteen commits on top of the release (it was six at `-3`, one per tier).
 Expect that number to climb as features land; the replay carries whatever the tiers hold. It
 built and it booted. The superproject pins it: `.gitmodules` says
-`branch = spritzwine-11.13-3` and the `wine` gitlink is that commit. It is a consumer like any
+`branch = spritzwine-11.13-5` and the `wine` gitlink is that commit. It is a consumer like any
 other, so it is force-pushed and you never edit it.
 
 The old hand-authored fork is not lost — it is preserved as the annotated tag
@@ -241,7 +241,7 @@ be exact:
   `bleeding-edge` — sits on wine 11.0. `git describe` puts `proton_11.0` at
   `wine-11.0-1190-g2f70bfd4d0f`. There is no newer wine base inside the Proton 11 cycle. Valve
   is not going to hand you one.
-* **11.13 is where upstream is.** `spritzwine-11.13-3` is the tiers replayed onto
+* **11.13 is where upstream is.** `spritzwine-11.13-5` is the tiers replayed onto
   `winehq/wine-11.13`. This one *does* move — that is the entire point of the upstream glass.
   Next release it will be 11.14, and the tiers will not have changed.
 
@@ -359,7 +359,8 @@ meant to be used together, whatever base it sits on.
 
 | Tag | Points at | Means |
 |---|---|---|
-| `spritzwine-11.13-3` | `8bf9f2c8e83` | Generated consumer, replayed **onto** upstream wine 11.13 — the full mix. What the superproject pins. |
+| `spritzwine-11.13-5` | `43f246a05cd` | Generated consumer, replayed **onto** upstream wine 11.13 -- the full mix. What the superproject pins. Re-poured twice since `-3` (`-4`: Bluetooth RFCOMM; `-5`: print portal, own SDP client) without a family cut, so it runs ahead of the `-3` rows below. |
+| `spritzwine-11.13-3` | `8bf9f2c8e83` | Family release 3 of the same. |
 | `spritzvalve-11.0-3` | `8c00a2018` | Generated consumer, replayed **onto** Proton's wine 11.0. Same commit as `spritzvalve-11.0-1` — the family rolled, this glass did not need re-pouring. |
 | `spritzvalve-11.0-1` | `8c00a2018` | Family release 1 of the same. Kept because things pinned it. |
 | `soda-11.12-3` | `da673812a8b` | The tier set stitched into a linear chain, authored **on** wine 11.12 |
@@ -395,7 +396,7 @@ SHA is written into the superproject's `wine` gitlink, it needs a ref holding it
 next regeneration turns your pin into the error above. So — routine pours, no tag; a pour that
 something pins, tag it before you pin it, even if you are not cutting a release that day.
 `.gitmodules` in the
-superproject sets `branch = spritzwine-11.13-3` for exactly this reason — and the fact that
+superproject sets `branch = spritzwine-11.13-5` for exactly this reason — and the fact that
 that line used to read `spritzvalve-11.0-1`, and the pin survived the switch without a single
 unfetchable SHA, is the policy paying for itself.
 
