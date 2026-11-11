@@ -28,6 +28,7 @@ type WinePool = Pool<ThreadpoolObject, WineOs>;
 const STATUS_SUCCESS: i32 = 0;
 const STATUS_PENDING: i32 = 0x103;
 const STATUS_INVALID_PARAMETER: i32 = 0xC000_000Du32 as i32;
+const STATUS_NO_MEMORY: i32 = 0xC000_0017u32 as i32;
 const STATUS_TOO_MANY_THREADS: i32 = 0xC000_0129u32 as i32;
 /// TP_CALLBACK_PRIORITY_NORMAL.
 const PRIORITY_NORMAL: u8 = 1;
@@ -279,6 +280,19 @@ pub extern "system" fn TpAllocTimer(
     STATUS_SUCCESS
 }
 
+/// C `tp_set_timer`: arm/disarm and report whether the timer was set before.
+unsafe fn tp_set_timer(
+    timer: *mut ThreadpoolObject,
+    timeout: *const i64,
+    period: i32,
+    window_length: i32,
+) -> bool {
+    unsafe {
+        let to = if timeout.is_null() { None } else { Some(*timeout) };
+        (*timer_queue()).set_timer(timer, to, period, window_length)
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn TpSetTimer(
     timer: *mut ThreadpoolObject,
@@ -286,11 +300,20 @@ pub extern "system" fn TpSetTimer(
     period: i32,
     window_length: i32,
 ) {
-    unsafe {
-        let to = if timeout.is_null() { None } else { Some(*timeout) };
-        (*timer).timer_set.store(!timeout.is_null(), Ordering::Release);
-        (*timer_queue()).set_timer(timer, to, period, window_length);
-    }
+    unsafe { tp_set_timer(timer, timeout, period, window_length) };
+}
+
+/// Exported by ntdll.spec from wine 11.21 on; on older bases the symbol is
+/// simply not referenced.
+#[unsafe(no_mangle)]
+pub extern "system" fn TpSetTimerEx(
+    timer: *mut ThreadpoolObject,
+    timeout: *const i64,
+    period: i32,
+    window_length: i32,
+) -> i32 {
+    // BOOL: return a full i32, see TpIsTimerSet.
+    unsafe { tp_set_timer(timer, timeout, period, window_length) as i32 }
 }
 
 #[unsafe(no_mangle)]
@@ -312,7 +335,7 @@ pub extern "system" fn TpWaitForTimer(timer: *mut ThreadpoolObject, cancel_pendi
 pub extern "system" fn TpReleaseTimer(timer: *mut ThreadpoolObject) {
     unsafe {
         (*timer).set_shutdown();
-        (*timer_queue()).set_timer(timer, None, 0, 0); // disarm before free
+        (*timer_queue()).remove_timer(timer); // drop the pending entry before free
         (*timer_queue()).obj_removed();
         tp_object_release(timer);
     }
@@ -526,7 +549,11 @@ pub extern "system" fn TpAllocIoCompletion(
 ) -> i32 {
     unsafe {
         let info = match parse_env(environment) { Ok(i) => i, Err(s) => return s };
-        let obj = Box::into_raw(Box::new(ThreadpoolObject::new_io(callback, userdata, info.priority)));
+        // Before bind_object, so the failure path has no pool reference to undo.
+        let Some(io) = ThreadpoolObject::try_new_io(callback, userdata, info.priority) else {
+            return STATUS_NO_MEMORY;
+        };
+        let obj = Box::into_raw(Box::new(io));
         bind_object(obj, &info);
         (*io_queue()).obj_added(obj, file as u64);
         *out = obj;

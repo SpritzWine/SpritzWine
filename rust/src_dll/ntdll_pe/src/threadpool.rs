@@ -210,8 +210,8 @@ fn free_carrier(n: *mut Node) {
 }
 
 /// Default surplus-worker idle timeout before termination, in 100ns units
-/// (THREADPOOL_WORKER_TIMEOUT = 5000 ms in the C).
-pub const WORKER_TIMEOUT_100NS: i64 = 5000 * 10_000;
+/// (THREADPOOL_WORKER_TIMEOUT = 60000 ms in the C since wine 11.21).
+pub const WORKER_TIMEOUT_100NS: i64 = 60_000 * 10_000;
 
 /// OS primitives the pool needs, abstracted so the worker lifecycle is unit-
 /// testable on the host (std threads + a condvar-backed futex) while the real
@@ -752,6 +752,14 @@ impl ThreadpoolObject {
         o.io = Some(Box::new(crate::io_queue::IoState::new()));
         o
     }
+    /// [`new_io`](Self::new_io) with the completion array reserved up front; `None`
+    /// when that allocation fails (TpAllocIoCompletion reports STATUS_NO_MEMORY).
+    pub fn try_new_io(callback: IoCallback, userdata: *mut c_void, priority: u8) -> Option<Self> {
+        let io = crate::io_queue::IoState::try_new()?;
+        let mut o = Self::with_callback(Callback::Io(callback), userdata, priority);
+        o.io = Some(Box::new(io));
+        Some(o)
+    }
 
     /// I/O completion state, for the [`IoQueue`](crate::io_queue::IoQueue).
     ///
@@ -967,7 +975,8 @@ pub fn tp_object_wait(obj: *mut ThreadpoolObject, group: bool) {
 // A service thread sleeps until the next armed timer's deadline (or until
 // set_timer wakes it), fires expired timers via `on_expire` (the wiring points
 // this at Pool::submit), and re-arms periodic ones. It stays alive while any
-// timer object is bound (objcount), exactly like the C.
+// timer object is bound (objcount) and for WORKER_TIMEOUT after the last one
+// goes, exactly like the C.
 //
 // Fidelity note: the C drives this with NT waitable-timer kernel objects; here
 // it is a portable clock+futex. A lost futex wake can make a freshly-set earlier
@@ -1014,6 +1023,8 @@ pub struct TimerQueue<Os: PoolOs> {
     /// Futex generation; bumped before each wake (set_timer / obj_removed / shutdown).
     update: AtomicU32,
     shutdown: AtomicBool,
+    /// How long the service thread outlives the last timer object.
+    idle_timeout_100ns: i64,
     on_expire: fn(*mut ThreadpoolObject),
     os: Os,
 }
@@ -1041,9 +1052,15 @@ impl<Os: PoolOs> TimerQueue<Os> {
             }),
             update: AtomicU32::new(0),
             shutdown: AtomicBool::new(false),
+            idle_timeout_100ns: WORKER_TIMEOUT_100NS,
             on_expire,
             os,
         }
+    }
+
+    /// Override the idle timeout (before the queue is shared).
+    pub fn set_idle_timeout(&mut self, t100ns: i64) {
+        self.idle_timeout_100ns = t100ns;
     }
 
     /// Bind a timer object (C `tp_timerqueue_lock`): ensure the service thread is
@@ -1061,8 +1078,8 @@ impl<Os: PoolOs> TimerQueue<Os> {
         self.lock.unlock();
     }
 
-    /// Unbind a timer object (C `tp_timerqueue_unlock`); wake the service so it can
-    /// exit once the last object is gone.
+    /// Unbind a timer object (C `tp_timerqueue_unlock`); wake the service so it
+    /// starts its idle timeout once the last object is gone.
     pub fn obj_removed(&self) {
         self.lock.lock();
         unsafe { &mut *self.inner.get() }.objcount -= 1;
@@ -1071,10 +1088,10 @@ impl<Os: PoolOs> TimerQueue<Os> {
         self.os.futex_wake_one(&self.update);
     }
 
-    /// Arm / re-arm / disarm a timer (C `TpSetTimer`). `timeout`: `None` disarms;
+    /// Arm / re-arm / disarm a timer (C `tp_set_timer`). `timeout`: `None` disarms;
     /// `Some(v)` with v>0 = absolute (wall clock), v<0 = relative (monotonic),
     /// v==0 = fire immediately (and, if periodic, also re-arm). `period_ms`/
-    /// `window_ms` as in TpSetTimer.
+    /// `window_ms` as in TpSetTimer. Returns whether the timer was set before.
     ///
     /// # Safety
     /// `obj` must be a live timer [`ThreadpoolObject`] bound via [`obj_added`].
@@ -1084,7 +1101,7 @@ impl<Os: PoolOs> TimerQueue<Os> {
         timeout: Option<i64>,
         period_ms: i32,
         window_ms: i32,
-    ) {
+    ) -> bool {
         let now_mono = self.os.now_mono_100ns();
         let mut submit_now = false;
         let mut arm: Option<(i64, Clock)> = None;
@@ -1103,6 +1120,9 @@ impl<Os: PoolOs> TimerQueue<Os> {
 
         self.lock.lock();
         let inner = unsafe { &mut *self.inner.get() };
+        // Under the lock with the entry update, so racing setters cannot leave
+        // the flag and the armed entry from different calls.
+        let was_set = unsafe { (*obj).timer_set.swap(timeout.is_some(), Ordering::AcqRel) };
         if let Some(pos) = inner.entries.iter().position(|e| e.obj == obj) {
             inner.entries.swap_remove(pos);
         }
@@ -1117,6 +1137,23 @@ impl<Os: PoolOs> TimerQueue<Os> {
         if submit_now {
             (self.on_expire)(obj);
         }
+        was_set
+    }
+
+    /// Drop a timer's pending entry at release (the removal in C
+    /// `tp_timerqueue_unlock`); unlike a disarm it leaves `timer_set` alone.
+    ///
+    /// # Safety
+    /// As [`set_timer`](Self::set_timer).
+    pub unsafe fn remove_timer(&self, obj: *mut ThreadpoolObject) {
+        self.lock.lock();
+        let inner = unsafe { &mut *self.inner.get() };
+        if let Some(pos) = inner.entries.iter().position(|e| e.obj == obj) {
+            inner.entries.swap_remove(pos);
+        }
+        self.lock.unlock();
+        self.update.fetch_add(1, Ordering::AcqRel);
+        self.os.futex_wake_one(&self.update);
     }
 
     /// The service loop (the Rust `timerqueue_thread_proc`).
@@ -1173,19 +1210,17 @@ impl<Os: PoolOs> TimerQueue<Os> {
             }
             let sleep = lower.min(TIMER_MAX_SLEEP_100NS);
 
-            let terminate = inner.objcount == 0 && inner.entries.is_empty();
-            if terminate {
-                inner.thread_running = false;
-            }
+            let idle = inner.objcount == 0 && inner.entries.is_empty();
+            // Read under the lock: a set_timer that lands after this pass bumps
+            // the generation, so the wait returns instead of sleeping through it
+            // (which the idle wait, unlike the capped one, could not afford).
+            let seen = self.update.load(Ordering::Acquire);
             self.lock.unlock();
 
             for obj in to_fire {
                 (self.on_expire)(obj);
             }
 
-            if terminate {
-                return;
-            }
             if self.shutdown.load(Ordering::Acquire) {
                 self.lock.lock();
                 unsafe { &mut *self.inner.get() }.thread_running = false;
@@ -1193,9 +1228,31 @@ impl<Os: PoolOs> TimerQueue<Os> {
                 return;
             }
 
-            let seen = self.update.load(Ordering::Acquire);
-            self.os.futex_wait(&self.update, seen, sleep);
+            // No timer object left: linger for the idle timeout and exit only if
+            // none was created meanwhile (C update_timers / timerqueue_thread_proc).
+            let wait = if idle { self.idle_timeout_100ns } else { sleep };
+            let woken = self.os.futex_wait(&self.update, seen, wait);
+            if idle && !woken {
+                self.lock.lock();
+                let inner = unsafe { &mut *self.inner.get() };
+                let exit = inner.objcount == 0 && inner.entries.is_empty();
+                if exit {
+                    inner.thread_running = false;
+                }
+                self.lock.unlock();
+                if exit {
+                    return;
+                }
+            }
         }
+    }
+
+    #[cfg(test)]
+    fn thread_running(&self) -> bool {
+        self.lock.lock();
+        let r = unsafe { &*self.inner.get() }.thread_running;
+        self.lock.unlock();
+        r
     }
 
     /// Signal shutdown, wake the service thread, and join it (teardown).
@@ -1703,6 +1760,66 @@ mod tests {
         _timer: *mut c_void,
     ) {
         unsafe { (*(userdata as *const AtomicI32)).fetch_add(1, Ordering::Relaxed) };
+    }
+
+    /// TpSetTimerEx's return value (wine tests/threadpool.c test_tp_timer): the
+    /// state before the call, which a re-arm or a release does not reset.
+    #[test]
+    fn timer_set_reports_previous_state() {
+        let fired = AtomicI32::new(0);
+        let timer = Box::new(ThreadpoolObject::new_timer(
+            record_timer_cb,
+            &fired as *const AtomicI32 as *mut c_void,
+            1,
+        ));
+        let tq = Box::new(TimerQueue::new(TestOs::new(), timer_on_expire as fn(*mut ThreadpoolObject)));
+        let tq: &TimerQueue<TestOs> = &tq;
+        tq.obj_added();
+        let far = Some(-(3600 * 10_000_000i64)); // never fires within the test
+        let is_set = || timer.timer_set.load(Ordering::Acquire);
+        unsafe {
+            assert!(!is_set());
+            assert!(!tq.set_timer(timer.as_ptr(), far, 0, 0), "first arm: was not set");
+            assert!(is_set());
+            assert!(tq.set_timer(timer.as_ptr(), far, 0, 0), "re-arm: was set");
+            assert!(tq.set_timer(timer.as_ptr(), None, 0, 0), "disarm: was set");
+            assert!(!is_set());
+            assert!(!tq.set_timer(timer.as_ptr(), None, 0, 0), "disarm again: was not set");
+            assert!(!tq.set_timer(timer.as_ptr(), far, 0, 0));
+            tq.remove_timer(timer.as_ptr());
+            assert!(is_set(), "release drops the entry, not the flag");
+        }
+        tq.obj_removed();
+        tq.shutdown();
+        assert_eq!(fired.load(Ordering::Relaxed), 0);
+    }
+
+    /// The service thread outlives the last timer object by the idle timeout (C
+    /// THREADPOOL_WORKER_TIMEOUT in update_timers): an object created within it
+    /// reuses the thread, and only a full idle period ends it.
+    #[test]
+    fn timer_service_lingers_when_idle() {
+        let mut tq = Box::new(TimerQueue::new(TestOs::new(), timer_on_expire as fn(*mut ThreadpoolObject)));
+        tq.set_idle_timeout(200 * 10_000); // 200 ms
+        let tq: &TimerQueue<TestOs> = &tq;
+        let spawned = || tq.os.handles.lock().unwrap().len();
+
+        tq.obj_added();
+        tq.obj_removed();
+        thread::sleep(Duration::from_millis(20));
+        assert!(tq.thread_running(), "service thread exited without the idle timeout");
+
+        tq.obj_added();
+        assert_eq!(spawned(), 1, "an object created within the timeout reuses the thread");
+        thread::sleep(Duration::from_millis(300));
+        assert!(tq.thread_running(), "service thread exited with an object bound");
+
+        tq.obj_removed();
+        spin_until(|| !tq.thread_running(), "idle service thread exit");
+        tq.obj_added();
+        assert_eq!(spawned(), 2, "a new object restarts the service thread");
+        tq.obj_removed();
+        tq.shutdown();
     }
 
     /// Timer queue: a relative one-shot fires once after its deadline, an

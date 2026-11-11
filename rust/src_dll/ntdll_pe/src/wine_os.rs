@@ -250,14 +250,19 @@ impl IoOs for WineOs {
             )
         };
     }
-    fn remove_completion(&self, port: u64) -> (u64, usize, i32, usize) {
+    fn remove_completion(&self, port: u64, timeout_100ns: Option<i64>) -> Option<(u64, usize, i32, usize)> {
         let mut key: usize = 0;
         let mut value: usize = 0;
         let mut iosb = IoStatusBlock { status: 0, information: 0 };
-        unsafe {
-            NtRemoveIoCompletion(port as Handle, &mut key, &mut value, &mut iosb, core::ptr::null())
+        let timeout = timeout_100ns.map(|t| -t); // relative
+        let timeout_ptr = timeout.as_ref().map_or(core::ptr::null(), |t| t as *const i64);
+        let status = unsafe {
+            NtRemoveIoCompletion(port as Handle, &mut key, &mut value, &mut iosb, timeout_ptr)
         };
-        (key as u64, value, iosb.status, iosb.information)
+        if status == STATUS_TIMEOUT {
+            return None;
+        }
+        Some((key as u64, value, iosb.status, iosb.information))
     }
     fn post_completion(&self, port: u64, key: u64, value: usize, status: i32, info: usize) {
         unsafe { NtSetIoCompletion(port as Handle, key as usize, value, status, info) };

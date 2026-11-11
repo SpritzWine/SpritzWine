@@ -5,7 +5,8 @@
 //! completion (keyed by the I/O object), it accounts one pending op, queues the
 //! completion record on the object, and fires it via `on_submit` (the wiring
 //! points this at Pool::submit). The pool worker then dispatches the I/O callback,
-//! which pops that completion. The thread lives while any I/O object is bound.
+//! which pops that completion. The thread lives while any I/O object is bound,
+//! and for WORKER_TIMEOUT after the last one goes.
 //!
 //! The per-object completion state ([`IoState`]) lives on the object (the C
 //! `u.io`), guarded by its own small lock, since both the I/O thread (push) and a
@@ -20,12 +21,15 @@
 //! when the last skipped completion drains. This is what keeps a completion from
 //! being delivered to a freed object.
 
-use crate::threadpool::{tp_object_release, PoolOs, ThreadpoolObject};
+use crate::threadpool::{tp_object_release, PoolOs, ThreadpoolObject, WORKER_TIMEOUT_100NS};
 use crate::work_queue::SpinLock;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Completion slots reserved at TpAllocIoCompletion, as in the C.
+const INITIAL_COMPLETIONS: usize = 8;
 
 struct Completion {
     status: i32,
@@ -77,6 +81,14 @@ impl IoState {
                 completions: Vec::new(),
             }),
         }
+    }
+
+    /// As [`new`](Self::new), reserving the C's initial completion array
+    /// (`8 * sizeof(*completions)`); `None` if the heap refuses it.
+    pub fn try_new() -> Option<Self> {
+        let s = Self::new();
+        unsafe { &mut *s.inner.get() }.completions.try_reserve_exact(INITIAL_COMPLETIONS).ok()?;
+        Some(s)
     }
 
     /// Account an async op that is about to be started (C `TpStartAsyncIoOperation`).
@@ -184,7 +196,8 @@ pub trait IoOs: PoolOs {
     /// Bind `file` to `port` with completion key `key` (wine: NtSetInformationFile).
     fn associate(&self, port: u64, file: u64, key: u64);
     /// Block until a completion is dequeued: `(key, cvalue, status, information)`.
-    fn remove_completion(&self, port: u64) -> (u64, usize, i32, usize);
+    /// With a timeout, `None` once it elapses with nothing dequeued.
+    fn remove_completion(&self, port: u64, timeout_100ns: Option<i64>) -> Option<(u64, usize, i32, usize)>;
     /// Post a completion (shutdown/wakeup sentinel; wine: NtSetIoCompletion).
     fn post_completion(&self, port: u64, key: u64, cvalue: usize, status: i32, information: usize);
 }
@@ -200,6 +213,8 @@ pub struct IoQueue<Os: IoOs> {
     lock: SpinLock,
     inner: UnsafeCell<IoQInner>,
     shutdown: AtomicBool,
+    /// How long the service thread outlives the last I/O object.
+    idle_timeout_100ns: i64,
     on_submit: fn(*mut ThreadpoolObject),
     os: Os,
 }
@@ -220,9 +235,15 @@ impl<Os: IoOs> IoQueue<Os> {
             lock: SpinLock::new(),
             inner: UnsafeCell::new(IoQInner { port: 0, objcount: 0, thread_running: false }),
             shutdown: AtomicBool::new(false),
+            idle_timeout_100ns: WORKER_TIMEOUT_100NS,
             on_submit,
             os,
         }
+    }
+
+    /// Override the idle timeout (before the queue is shared).
+    pub fn set_idle_timeout(&mut self, t100ns: i64) {
+        self.idle_timeout_100ns = t100ns;
     }
 
     /// Bind an I/O object + its `file` to the port (C `tp_ioqueue_lock`): create
@@ -250,7 +271,7 @@ impl<Os: IoOs> IoQueue<Os> {
 
     /// Account an I/O object leaving the queue on the immediate-destroy path (C
     /// `tp_ioqueue_unlock`, via tp_object_prepare_shutdown). Wake the thread if it
-    /// was the last, so an idle thread can terminate.
+    /// was the last, so it starts its idle timeout.
     pub fn unlock(&self) {
         self.lock.lock();
         let inner = unsafe { &mut *self.inner.get() };
@@ -259,7 +280,7 @@ impl<Os: IoOs> IoQueue<Os> {
         let port = inner.port;
         self.lock.unlock();
         if last {
-            // Sentinel (key 0) so the thread re-checks objcount / terminates.
+            // Sentinel (key 0) so the thread re-checks objcount.
             self.os.post_completion(port, 0, 0, 0, 0);
         }
     }
@@ -271,8 +292,28 @@ impl<Os: IoOs> IoQueue<Os> {
             self.lock.unlock();
             p
         };
+        let mut timed_out = false;
         loop {
-            let (key, cvalue, status, information) = self.os.remove_completion(port);
+            self.lock.lock();
+            let inner = unsafe { &mut *self.inner.get() };
+            let idle = inner.objcount == 0;
+            // No I/O object left: exit only after a full idle timeout in which
+            // none was created (C ioqueue_thread_proc).
+            let done = self.shutdown.load(Ordering::Acquire) || (idle && timed_out);
+            if done {
+                inner.thread_running = false;
+            }
+            self.lock.unlock();
+            if done {
+                return; // port persists for a future obj_added to reuse
+            }
+
+            let timeout = if idle { Some(self.idle_timeout_100ns) } else { None };
+            let Some((key, cvalue, status, information)) = self.os.remove_completion(port, timeout) else {
+                timed_out = true;
+                continue;
+            };
+            timed_out = false;
             if key != 0 {
                 let io = key as *mut ThreadpoolObject;
                 // SAFETY: the key stays a live I/O object until it is destroyed here
@@ -291,18 +332,15 @@ impl<Os: IoOs> IoQueue<Os> {
                     IoAction::Ignore => {}
                 }
             }
-
-            self.lock.lock();
-            let inner = unsafe { &mut *self.inner.get() };
-            let done = self.shutdown.load(Ordering::Acquire) || inner.objcount == 0;
-            if done {
-                inner.thread_running = false;
-            }
-            self.lock.unlock();
-            if done {
-                return; // port persists for a future obj_added to reuse
-            }
         }
+    }
+
+    #[cfg(test)]
+    fn thread_running(&self) -> bool {
+        self.lock.lock();
+        let r = unsafe { &*self.inner.get() }.thread_running;
+        self.lock.unlock();
+        r
     }
 
     /// Signal shutdown, wake the thread, join it, and close the port (teardown).
@@ -331,6 +369,7 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
     use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
 
     /// Mock completion port: a FIFO of (key, cvalue, status, info) the test posts.
     struct MockPort {
@@ -346,13 +385,20 @@ mod tests {
             self.q.lock().unwrap().push_back((key, cvalue, status, info));
             self.cv.notify_all();
         }
-        fn remove(&self) -> (u64, usize, i32, usize) {
+        fn remove(&self, timeout_100ns: Option<i64>) -> Option<(u64, usize, i32, usize)> {
+            let deadline = timeout_100ns.map(|t| Instant::now() + Duration::from_nanos(t as u64 * 100));
             let mut g = self.q.lock().unwrap();
             loop {
                 if let Some(c) = g.pop_front() {
-                    return c;
+                    return Some(c);
                 }
-                g = self.cv.wait(g).unwrap();
+                g = match deadline {
+                    None => self.cv.wait(g).unwrap(),
+                    Some(d) => {
+                        let left = d.checked_duration_since(Instant::now())?;
+                        self.cv.wait_timeout(g, left).unwrap().0
+                    }
+                };
             }
         }
     }
@@ -392,8 +438,8 @@ mod tests {
         }
         fn close_port(&self, _port: u64) {}
         fn associate(&self, _port: u64, _file: u64, _key: u64) {}
-        fn remove_completion(&self, _port: u64) -> (u64, usize, i32, usize) {
-            self.port.remove()
+        fn remove_completion(&self, _port: u64, timeout_100ns: Option<i64>) -> Option<(u64, usize, i32, usize)> {
+            self.port.remove(timeout_100ns)
         }
         fn post_completion(&self, _port: u64, key: u64, cvalue: usize, status: i32, info: usize) {
             self.port.post(key, cvalue, status, info);
@@ -475,6 +521,42 @@ mod tests {
         q.shutdown();
     }
 
+    /// The service thread outlives the last I/O object by the idle timeout (C
+    /// THREADPOOL_WORKER_TIMEOUT in ioqueue_thread_proc): an object created
+    /// within it reuses the thread, and only a full idle period ends it.
+    #[test]
+    fn io_service_lingers_when_idle() {
+        let res = IoResult {
+            fired: AtomicI32::new(0),
+            status: AtomicI32::new(-1),
+            information: AtomicUsize::new(0),
+            cvalue: AtomicUsize::new(0),
+        };
+        let io = Box::new(ThreadpoolObject::new_io(io_cb, &res as *const IoResult as *mut c_void, 1));
+        let os = MockIoOs { port: Arc::new(MockPort::new()), handles: Mutex::new(Vec::new()) };
+        let mut q: Box<IoQueue<MockIoOs>> = Box::new(IoQueue::new(os, io_on_submit as fn(*mut ThreadpoolObject)));
+        q.set_idle_timeout(200 * 10_000); // 200 ms
+        let q: &IoQueue<MockIoOs> = &q;
+        let spawned = || q.os.handles.lock().unwrap().len();
+
+        unsafe { q.obj_added(io.as_ptr(), 0x1234) };
+        q.unlock();
+        thread::sleep(Duration::from_millis(20));
+        assert!(q.thread_running(), "service thread exited without the idle timeout");
+
+        unsafe { q.obj_added(io.as_ptr(), 0x1234) };
+        assert_eq!(spawned(), 1, "an object created within the timeout reuses the thread");
+        thread::sleep(Duration::from_millis(300));
+        assert!(q.thread_running(), "service thread exited with an object bound");
+
+        q.unlock();
+        spin_until(|| !q.thread_running(), "idle service thread exit");
+        unsafe { q.obj_added(io.as_ptr(), 0x1234) };
+        assert_eq!(spawned(), 2, "a new object restarts the service thread");
+        q.unlock();
+        q.shutdown();
+    }
+
     /// The "expected completions" accounting (C bdba5ba5f65), exercised at the
     /// IoState level without freeing objects.
     #[test]
@@ -502,6 +584,17 @@ mod tests {
         // Drain: first skipped completion is skipped, the last one destroys.
         assert_eq!(s.handle_completion(0, 0, 0), IoAction::Ignore);
         assert_eq!(s.handle_completion(0, 0, 0), IoAction::Destroy);
+    }
+
+    /// try_new reserves the C's initial completion array and behaves like new.
+    #[test]
+    fn io_state_try_new_reserves_completions() {
+        let s = IoState::try_new().expect("allocation");
+        assert!(unsafe { &*s.inner.get() }.completions.capacity() >= INITIAL_COMPLETIONS);
+        assert!(!s.is_busy());
+        s.start_async();
+        assert_eq!(s.handle_completion(0, 0, 0), IoAction::Submit);
+        assert!(s.pop_completion().is_some());
     }
 
     /// With nothing outstanding, begin_shutdown authorises immediate destruction.

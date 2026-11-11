@@ -442,9 +442,24 @@ them, resolve them, move on.
   `soda-branding` and in every consumer tag shipped so far, so you can check your work with
   `git ls-tree <ref> dlls/user32/resources/oic_winlogo.ico`.
 
-**`soda-ntdll` deletes `dlls/ntdll/threadpool.c` outright** — all 2797 lines; Rust replaces
-it. That is safe across the base swap for two independently-checked reasons: Valve never
-patched `threadpool.c`, so nothing of theirs is being thrown away, and the `Tp*` export
-surface in `ntdll.spec` is **identical** between 11.0 and 11.12 (35 exports on both). If
-either of those ever stops being true, this deletion needs re-verifying before the next
-`soda-ntdll` consumer ships.
+**`soda-ntdll` guts `dlls/ntdll/threadpool.c` but keeps the file.** It removes 2797 lines,
+the whole `Tp*` implementation, which the Rust crate `wine_ntdll_pe`
+(`rust/src_dll/ntdll_pe`, in this repo, not in the tier) replaces. The 689 lines that stay
+are still C and still exported: `RtlSetIoCompletionCallback` and the legacy timer queue
+(`RtlCreateTimerQueue`, `RtlDeleteTimerQueueEx`, `RtlCreateTimer`, `RtlUpdateTimer`,
+`RtlDeleteTimer`). So when a base that changed the `Tp*` code is replayed (wine-11.21 did),
+the file stops as a *content* conflict, not a modify/delete: **take the tier's side of every
+hunk and never `git rm` the file.** The result must be the tier's blob byte for byte; check
+with `git ls-tree soda-ntdll dlls/ntdll/threadpool.c`. An upstream change inside the removed
+region reaches no consumer through the replay and has to be ported to the Rust crate by
+hand; an upstream change to the retained 689 lines merges or conflicts like any other C.
+
+The removal is safe across bases for two independently-checked reasons. Valve never patched
+`threadpool.c`, so nothing of theirs is thrown away. And every `Tp*` export in the target
+base's `ntdll.spec` is defined by `wine_ntdll_pe` (`src/exports.rs`): the spec comes from
+the base, the symbols from Rust, so a `Tp*` line without a Rust symbol is an undefined
+reference at the ntdll link. The set is 35 exports on 11.0, 11.12 and 11.13 and 36 from
+wine-11.21 on, which adds `TpSetTimerEx`. A Rust export the base's spec does not list is
+harmless (linked in, not exported), so the rule is one-way: the base's `Tp*` set must be a
+subset of what the crate defines. **Re-check both on every base bump**, and build the
+consumer from a superproject commit whose crate already has the new exports.

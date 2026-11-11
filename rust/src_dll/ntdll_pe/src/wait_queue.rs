@@ -30,7 +30,7 @@ pub const MAX_WAIT_OBJECTS: usize = 63;
 /// Sentinel "no timeout" deadline.
 const NO_DEADLINE: i64 = i64::MAX;
 /// Idle grace before an empty bucket's thread exits (THREADPOOL_WORKER_TIMEOUT).
-const WAIT_GRACE_100NS: i64 = 5000 * 10_000;
+const WAIT_GRACE_100NS: i64 = crate::threadpool::WORKER_TIMEOUT_100NS;
 
 /// OS event + multi-wait primitives (wine: NtCreateEvent / NtSetEvent /
 /// NtWaitForMultipleObjects). Handles are opaque `u64` (a wine HANDLE).
