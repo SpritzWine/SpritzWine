@@ -129,7 +129,7 @@ name = "spritzwine"
 # branch on the valve-wine remote. `winehq/wine-11.13` does not resolve; upstream
 # release points are tags. Getting this wrong made the consumer's base
 # unresolvable and every currency check unanswerable.
-base = "wine-11.13"
+base = "wine-11.21"
 soda_tip = "soda-full"
 pinned_by_superproject = true
 
